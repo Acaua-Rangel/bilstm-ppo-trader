@@ -1,0 +1,25 @@
+{
+  "name": "ai-trading-bot",
+  "version": "1.0.0",
+  "description": "Trading bot com PatchTST + PPO seguindo Hexagonal Architecture",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "ts-node src/main.ts",
+    "train": "ts-node src/main.ts train",
+    "test:strategy": "ts-node src/main.ts test",
+    "invest": "ts-node src/main.ts invest",
+    "lint": "eslint src --ext .ts"
+  },
+  "dependencies": {
+    "@tensorflow/tfjs-node": "^4.17.0",
+    "ccxt": "^4.3.0",
+    "technicalindicators": "^3.1.0",
+    "dotenv": "^16.4.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.0"
+  }
+}

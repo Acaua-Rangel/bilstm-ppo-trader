@@ -1,4 +1,5 @@
-import * as tf from "@tensorflow/tfjs-node";
+import { tf } from "../tensorflow/tf";
+import type * as TF from "@tensorflow/tfjs-node";
 import { ForecastModel } from "../../domain/ports/ForecastModel";
 import { FeatureMatrix } from "../../domain/collections/FeatureMatrix";
 
@@ -8,7 +9,7 @@ import { FeatureMatrix } from "../../domain/collections/FeatureMatrix";
  * Implements the ForecastModel port.
  */
 export class BiLSTMForecaster implements ForecastModel {
-  private model: tf.LayersModel;
+  private model: TF.LayersModel;
   private readonly config: BiLSTMConfig;
   private compiled = false;
 
@@ -17,7 +18,7 @@ export class BiLSTMForecaster implements ForecastModel {
     this.model = this.buildModel();
   }
 
-  private buildModel(): tf.LayersModel {
+  private buildModel(): TF.LayersModel {
     const { seqLen, numFeatures, hiddenUnits, dropout, horizon, l2 } = this.config;
     const reg = tf.regularizers.l2({ l2 });
     const input = tf.input({ shape: [seqLen, numFeatures] });
@@ -26,32 +27,32 @@ export class BiLSTMForecaster implements ForecastModel {
       layer: tf.layers.lstm({
         units: hiddenUnits, returnSequences: true,
         kernelRegularizer: reg, recurrentRegularizer: reg,
-      }) as tf.RNN,
-    }).apply(input) as tf.SymbolicTensor;
+      }) as TF.RNN,
+    }).apply(input) as TF.SymbolicTensor;
 
-    const drop1 = tf.layers.dropout({ rate: dropout }).apply(lstm1) as tf.SymbolicTensor;
+    const drop1 = tf.layers.dropout({ rate: dropout }).apply(lstm1) as TF.SymbolicTensor;
 
     const lstm2 = tf.layers.bidirectional({
       layer: tf.layers.lstm({
         units: Math.floor(hiddenUnits / 2),
         kernelRegularizer: reg, recurrentRegularizer: reg,
-      }) as tf.RNN,
-    }).apply(drop1) as tf.SymbolicTensor;
+      }) as TF.RNN,
+    }).apply(drop1) as TF.SymbolicTensor;
 
-    const drop2 = tf.layers.dropout({ rate: dropout }).apply(lstm2) as tf.SymbolicTensor;
+    const drop2 = tf.layers.dropout({ rate: dropout }).apply(lstm2) as TF.SymbolicTensor;
 
     const dense = tf.layers.dense({
       units: hiddenUnits, activation: "relu", kernelRegularizer: reg,
-    }).apply(drop2) as tf.SymbolicTensor;
+    }).apply(drop2) as TF.SymbolicTensor;
 
-    const output = tf.layers.dense({ units: horizon }).apply(dense) as tf.SymbolicTensor;
+    const output = tf.layers.dense({ units: horizon }).apply(dense) as TF.SymbolicTensor;
 
     return tf.model({ inputs: input, outputs: output });
   }
 
   async predict(features: FeatureMatrix): Promise<ReadonlyArray<number>> {
     const inputTensor = tf.tensor3d([features.toRawArray()]);
-    const output = this.model.predict(inputTensor) as tf.Tensor;
+    const output = this.model.predict(inputTensor) as TF.Tensor;
     const result = Array.from(await output.data());
     tf.dispose([inputTensor, output]);
     return result;
@@ -82,7 +83,7 @@ export class BiLSTMForecaster implements ForecastModel {
   // Single callback combining cosine annealing (onEpochBegin) and early stopping (onEpochEnd).
   // Before: mixing plain object + EarlyStopping instance caused tfjs to wrap them in
   // CustomCallback, breaking `this.getMonitorValue is not a function`.
-  private makeTrainingCallback(totalEpochs: number): tf.CustomCallbackArgs {
+  private makeTrainingCallback(totalEpochs: number): TF.CustomCallbackArgs {
     const { learningRate, minLR, earlyStoppingPatience } = this.config;
     const MIN_DELTA = 1e-4;
     let bestValLoss = Infinity;
@@ -94,7 +95,7 @@ export class BiLSTMForecaster implements ForecastModel {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (this.model.optimizer as any).learningRate = lr;
       },
-      onEpochEnd: async (_epoch: number, logs?: tf.Logs) => {
+      onEpochEnd: async (_epoch: number, logs?: TF.Logs) => {
         const valLoss = logs?.["val_loss"];
         if (typeof valLoss !== "number") return;
         if (valLoss < bestValLoss - MIN_DELTA) {

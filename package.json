@@ -1,13 +1,16 @@
 {
-  "name": "ai-trading-bot",
+  "name": "bilstm-ppo-trader",
   "version": "1.0.0",
-  "description": "Trading bot com PatchTST + PPO seguindo Hexagonal Architecture",
+  "description": "Trading bot with BiLSTM + PPO following Hexagonal Architecture",
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc",
     "start": "ts-node src/main.ts",
     "train": "ts-node src/main.ts train",
+    "train:gpu": "ts-node src/main.ts train --device=gpu",
+    "train:cpu": "ts-node src/main.ts train --device=cpu",
     "test:strategy": "ts-node src/main.ts test",
+    "test:strategy:gpu": "ts-node src/main.ts test --device=gpu",
     "invest": "ts-node src/main.ts invest",
     "lint": "eslint src --ext .ts"
   },
@@ -16,6 +19,9 @@
     "ccxt": "^4.3.0",
     "technicalindicators": "^3.1.0",
     "dotenv": "^16.4.0"
+  },
+  "optionalDependencies": {
+    "@tensorflow/tfjs-node-gpu": "^4.17.0"
   },
   "devDependencies": {
     "typescript": "^5.4.0",

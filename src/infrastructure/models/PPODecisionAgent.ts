@@ -1,4 +1,5 @@
-import * as tf from "@tensorflow/tfjs-node";
+import { tf } from "../tensorflow/tf";
+import type * as TF from "@tensorflow/tfjs-node";
 import { DecisionAgent, AgentDecision, AgentExperience } from "../../domain/ports/DecisionAgent";
 import { TradingAction } from "../../domain/enums/TradingAction";
 
@@ -7,12 +8,12 @@ import { TradingAction } from "../../domain/enums/TradingAction";
  * Implements the DecisionAgent port.
  */
 export class PPODecisionAgent implements DecisionAgent {
-  private policyNet: tf.LayersModel;
-  private valueNet: tf.LayersModel;
+  private policyNet: TF.LayersModel;
+  private valueNet: TF.LayersModel;
   private experiences: AgentExperience[] = [];
   private readonly config: PPOConfig;
-  private readonly policyOpt: tf.AdamOptimizer;
-  private readonly valueOpt: tf.AdamOptimizer;
+  private readonly policyOpt: TF.AdamOptimizer;
+  private readonly valueOpt: TF.AdamOptimizer;
   private updateCount = 0;
 
   constructor(config: PPOConfig) {
@@ -24,33 +25,33 @@ export class PPODecisionAgent implements DecisionAgent {
     this.valueOpt = tf.train.adam(config.valueLR);
   }
 
-  private buildPolicyNet(): tf.LayersModel {
+  private buildPolicyNet(): TF.LayersModel {
     const input = tf.input({ shape: [this.config.stateSize] });
     const hidden = this.buildHiddenLayers(input);
     const output = tf.layers.dense({
       units: this.config.actionSize, activation: "softmax",
-    }).apply(hidden) as tf.SymbolicTensor;
+    }).apply(hidden) as TF.SymbolicTensor;
     return tf.model({ inputs: input, outputs: output, name: "Actor" });
   }
 
-  private buildValueNet(): tf.LayersModel {
+  private buildValueNet(): TF.LayersModel {
     const input = tf.input({ shape: [this.config.stateSize] });
     const hidden = this.buildHiddenLayers(input);
-    const output = tf.layers.dense({ units: 1 }).apply(hidden) as tf.SymbolicTensor;
+    const output = tf.layers.dense({ units: 1 }).apply(hidden) as TF.SymbolicTensor;
     return tf.model({ inputs: input, outputs: output, name: "Critic" });
   }
 
-  private buildHiddenLayers(input: tf.SymbolicTensor): tf.SymbolicTensor {
+  private buildHiddenLayers(input: TF.SymbolicTensor): TF.SymbolicTensor {
     const layer1 = tf.layers.dense({ units: 128, activation: "tanh" })
-      .apply(input) as tf.SymbolicTensor;
+      .apply(input) as TF.SymbolicTensor;
     return tf.layers.dense({ units: 64, activation: "tanh" })
-      .apply(layer1) as tf.SymbolicTensor;
+      .apply(layer1) as TF.SymbolicTensor;
   }
 
   async decide(state: ReadonlyArray<number>): Promise<AgentDecision> {
     const stateTensor = tf.tensor2d([Array.from(state)]);
-    const probs = this.policyNet.predict(stateTensor) as tf.Tensor;
-    const value = this.valueNet.predict(stateTensor) as tf.Tensor;
+    const probs = this.policyNet.predict(stateTensor) as TF.Tensor;
+    const value = this.valueNet.predict(stateTensor) as TF.Tensor;
     const probsArray = Array.from(probs.dataSync());
     const estimatedValue = value.dataSync()[0];
     tf.dispose([stateTensor, probs, value]);
@@ -139,7 +140,7 @@ export class PPODecisionAgent implements DecisionAgent {
 
   private async runOneEpoch(
     advantages: number[], returns: number[],
-    policyOpt: tf.Optimizer, valueOpt: tf.Optimizer
+    policyOpt: TF.Optimizer, valueOpt: TF.Optimizer
   ): Promise<void> {
     const states = tf.tensor2d(this.experiences.map(e => Array.from(e.state)));
     const actions = tf.tensor1d(this.experiences.map(e => e.actionCode), "int32");
@@ -152,12 +153,12 @@ export class PPODecisionAgent implements DecisionAgent {
   }
 
   private updatePolicyNet(
-    states: tf.Tensor, actions: tf.Tensor,
-    advantages: tf.Tensor, oldLogProbs: tf.Tensor,
-    optimizer: tf.Optimizer
+    states: TF.Tensor, actions: TF.Tensor,
+    advantages: TF.Tensor, oldLogProbs: TF.Tensor,
+    optimizer: TF.Optimizer
   ): void {
     this.applyClippedGradients(() => {
-      const probs = this.policyNet.predict(states) as tf.Tensor;
+      const probs = this.policyNet.predict(states) as TF.Tensor;
       const logProbs = probs.log().add(1e-8);
       const actionLP = logProbs.gather(actions, 1).squeeze();
       const ratio = actionLP.sub(oldLogProbs).exp();
@@ -165,22 +166,22 @@ export class PPODecisionAgent implements DecisionAgent {
       const surr2 = ratio.clipByValue(
         1 - this.config.clipRatio, 1 + this.config.clipRatio
       ).mul(advantages);
-      return tf.minimum(surr1, surr2).mean().neg() as tf.Scalar;
+      return tf.minimum(surr1, surr2).mean().neg() as TF.Scalar;
     }, optimizer);
   }
 
-  private updateValueNet(states: tf.Tensor, returns: tf.Tensor, optimizer: tf.Optimizer): void {
+  private updateValueNet(states: TF.Tensor, returns: TF.Tensor, optimizer: TF.Optimizer): void {
     this.applyClippedGradients(() => {
-      const values = (this.valueNet.predict(states) as tf.Tensor).squeeze();
-      return tf.losses.meanSquaredError(returns, values) as tf.Scalar;
+      const values = (this.valueNet.predict(states) as TF.Tensor).squeeze();
+      return tf.losses.meanSquaredError(returns, values) as TF.Scalar;
     }, optimizer);
   }
 
   // Global norm gradient clipping (PPO standard): limits ||grad||₂ ≤ maxGradNorm.
-  private applyClippedGradients(lossFn: () => tf.Scalar, optimizer: tf.Optimizer): void {
+  private applyClippedGradients(lossFn: () => TF.Scalar, optimizer: TF.Optimizer): void {
     const { value, grads } = tf.variableGrads(lossFn);
     const gradNames = Object.keys(grads);
-    const clippedGrads: tf.NamedTensorMap = {};
+    const clippedGrads: TF.NamedTensorMap = {};
     tf.tidy(() => {
       const sqSum = tf.addN(gradNames.map(k => grads[k].square().sum()));
       const globalNorm = sqSum.sqrt();

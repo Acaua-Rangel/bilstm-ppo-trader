@@ -21,7 +21,10 @@ export class Cli {
   }
 
   async run(args: string[]): Promise<void> {
-    const modeName = args[0];
+    // Filter out --flag args (e.g. --device=gpu) so they don't get parsed as a mode.
+    // Flags are read directly by their consumers (e.g. tf.ts reads --device).
+    const positional = args.filter(a => !a.startsWith("--"));
+    const modeName = positional[0];
     if (!modeName) return this.printUsage();
     const command = this.commands.get(modeName);
     if (!command) return this.printUnknown(modeName);
@@ -36,7 +39,15 @@ AI Trading Bot — available modes:
   test     Backtest on real Binance data (measures win rate, no money spent)
   invest   Apply REAL MONEY 24/7 (requires Binance credentials)
 
-Usage: npm start <mode>
+Flags:
+  --device=auto|cpu|gpu   Choose TensorFlow backend (default: auto).
+                          auto = GPU if available, else CPU.
+                          Can also be set via TF_DEVICE env var.
+
+Usage:
+  npm run train
+  npm run train -- --device=gpu
+  npm run test:strategy -- --device=cpu
     `);
   }
 

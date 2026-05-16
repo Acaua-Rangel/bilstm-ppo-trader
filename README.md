@@ -117,6 +117,46 @@ npm run test:strategy   # validate before going live!
 npm run invest          # only after thorough validation
 ```
 
+## CPU vs GPU (CUDA)
+
+The bot supports both CPU and CUDA-accelerated GPU execution via TensorFlow.js. Backend selection happens at startup; once chosen, all training and inference run on it.
+
+### How it chooses
+
+1. CLI flag: `--device=auto|cpu|gpu`
+2. Env var: `TF_DEVICE=auto|cpu|gpu`
+3. Default: `auto`
+
+`auto` tries GPU first and falls back to CPU if `@tensorflow/tfjs-node-gpu` is not installed or fails to load (missing CUDA, wrong driver, etc.). `gpu` attempts GPU and warns + falls back on failure. `cpu` forces CPU regardless.
+
+You'll see a line at startup like:
+```
+[TF] Backend: GPU (mode: auto)
+```
+
+### Installing GPU support
+
+`@tensorflow/tfjs-node-gpu` is declared as an `optionalDependency`, so `npm install` won't fail if your machine doesn't have CUDA. If the optional install was skipped, install it manually after setting up CUDA:
+
+```bash
+npm install @tensorflow/tfjs-node-gpu
+```
+
+Requirements: NVIDIA GPU with CUDA Toolkit and cuDNN installed (versions matching the tfjs-node-gpu release notes).
+
+### Convenience scripts
+
+```bash
+npm run train             # auto (GPU if available)
+npm run train:gpu         # force GPU (falls back to CPU if missing)
+npm run train:cpu         # force CPU
+npm run test:strategy:gpu # backtest on GPU
+
+# Generic form
+npm run train -- --device=gpu
+npm run test:strategy -- --device=cpu
+```
+
 ### Environment variables
 
 | Variable | Description | Example |
@@ -130,6 +170,7 @@ npm run invest          # only after thorough validation
 | `BINANCE_API_KEY` | Binance API key (invest mode only) | — |
 | `BINANCE_API_SECRET` | Binance API secret (invest mode only) | — |
 | `BINANCE_TESTNET` | Use Binance testnet | `true` |
+| `TF_DEVICE` | TF backend: `auto`, `cpu`, or `gpu` (CLI flag wins) | `auto` |
 
 ## Recommended execution order
 

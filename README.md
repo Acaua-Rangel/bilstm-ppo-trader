@@ -1,34 +1,34 @@
 # AI Trading Bot
 
-Bot de trading com **PatchTST** (forecast) + **PPO** (decisão), em TypeScript.
+Trading bot with **BiLSTM** (forecast) + **PPO** (decision), built in TypeScript.
 
-## Arquitetura
+## Architecture
 
 **Hexagonal Architecture (Ports & Adapters) + Clean Architecture**
 
 ```
 src/
-├── domain/                    Núcleo - regras de negócio puras
+├── domain/                    Core — pure business rules
 │   ├── value-objects/         Money, Price, Quantity, Symbol, Percentage…
 │   ├── entities/              Candle, Order, Position, Portfolio
 │   ├── collections/           CandleSeries, FeatureMatrix (first-class)
-│   ├── enums/                 TradingAction (com comportamento)
-│   ├── ports/                 INTERFACES — pontos de extensão
+│   ├── enums/                 TradingAction (with behavior)
+│   ├── ports/                 INTERFACES — extension points
 │   └── errors/                DomainError hierarchy
 │
-├── application/               Casos de uso (orquestração)
+├── application/               Use cases (orchestration)
 │   ├── services/              FeatureBuilder, TradingCycle
-│   └── use-cases/             TrainModels, TestStrategy, Invest
+│   └── use-cases/             TrainModels, Backtest, Invest
 │
-├── infrastructure/            ADAPTADORES (implementam ports)
+├── infrastructure/            ADAPTERS (implement ports)
 │   ├── market-data/           BinanceMarketData
 │   ├── execution/             PaperExecutor, BinanceLiveExecutor
-│   ├── models/                PatchTSTForecaster, PPODecisionAgent
+│   ├── models/                BiLSTMForecaster, PPODecisionAgent
 │   ├── risk/                  ConservativeRiskPolicy
 │   ├── logging/               ConsoleLogger
 │   └── storage/               FileModelStorage
 │
-├── cli/                       Interface CLI
+├── cli/                       CLI interface
 │   ├── Container.ts           Composition Root (DI)
 │   ├── Cli.ts                 Dispatcher
 │   └── commands/              TrainCommand, TestCommand, InvestCommand
@@ -36,75 +36,109 @@ src/
 └── main.ts                    Entry point
 ```
 
-## Princípios aplicados
+## Design principles
 
 ### SOLID
-- **Single Responsibility:** cada classe faz uma coisa. `FeatureBuilder` só constrói features. `RiskPolicy` só avalia risco.
-- **Open/Closed:** novos modos CLI = nova entrada no `Map<string, Command>`. Sem editar `Cli.ts`.
-- **Liskov:** `PaperExecutor`, `BinanceLiveExecutor` e futuros executors são intercambiáveis via `TradeExecutor`.
-- **Interface Segregation:** ports pequenos e focados. `MarketDataProvider` só lê dados, não executa.
-- **Dependency Inversion:** `application/` depende de ports (`domain/ports/`), nunca de TF.js ou ccxt.
+- **Single Responsibility:** each class does one thing. `FeatureBuilder` only builds features. `RiskPolicy` only evaluates risk.
+- **Open/Closed:** new CLI modes = new entry in `Map<string, Command>`. No changes to `Cli.ts`.
+- **Liskov:** `PaperExecutor`, `BinanceLiveExecutor`, and future executors are interchangeable via `TradeExecutor`.
+- **Interface Segregation:** small, focused ports. `MarketDataProvider` only reads data, never executes.
+- **Dependency Inversion:** `application/` depends on ports (`domain/ports/`), never on TF.js or ccxt.
 
 ### Object Calisthenics
-- **#3 Wrap primitives:** `Money`, `Price`, `Quantity`, `Percentage` — nunca `number` solto.
+- **#3 Wrap primitives:** `Money`, `Price`, `Quantity`, `Percentage` — never a bare `number`.
 - **#4 First-class collections:** `CandleSeries`, `FeatureMatrix`.
-- **#5 One dot per line:** Tell don't ask — `position.unrealizedPnL(price)`, não `position.entryPrice / current * 100`.
-- **#6 No abbreviations:** `executionPrice` em vez de `execPx`.
-- **#7 Small entities:** classes pequenas, métodos curtos.
-- **#8 Max 2 instance variables:** aplicado nos VOs e em `Portfolio` (cash + position).
-- **#9 No getters/setters:** comportamento ao invés de exposição. `position.isOpen()`, não `position.quantity > 0`.
+- **#5 One dot per line:** Tell don't ask — `position.unrealizedPnL(price)`, not `position.entryPrice / current * 100`.
+- **#6 No abbreviations:** `executionPrice` instead of `execPx`.
+- **#7 Small entities:** small classes, short methods.
+- **#8 Max 2 instance variables:** applied in value objects and `Portfolio` (cash + position).
+- **#9 No getters/setters:** behavior over exposure. `position.isOpen()`, not `position.quantity > 0`.
 
-## Os 3 modos
+## The 3 modes
 
-### 1. TRAIN — treina os modelos
+### 1. TRAIN — trains the models
 
 ```bash
 npm run train
 ```
 
-Baixa 2000 candles históricos, treina PatchTST com regressão supervisionada, depois treina o PPO em N episódios. **Nunca toca em executor real** — `TrainCommand` nem instancia executor.
+Downloads 5000 historical candles from Binance, trains the **BiLSTM** forecaster with supervised regression (predicting the next 4 returns), then trains the **PPO** agent for 30 episodes. **Never touches a real executor** — `TrainCommand` does not instantiate one.
 
-### 2. TEST — paper trading
+Training optimizations included:
+- L2 regularization on all LSTM kernels
+- Cosine annealing learning rate schedule
+- Early stopping on `val_loss` (patience 8)
+- Exponential LR decay for PPO across episodes
+- Global norm gradient clipping (`maxGradNorm = 0.5`)
+- O(n²) fix: bounded sliding window with 200-candle indicator warmup
+- Return clipping ±10% to remove flash crash outliers
+- Dynamic RL state: unrealized PnL, time in position, recent volatility
+
+### 2. TEST — backtest with real data
 
 ```bash
 npm run test:strategy
 ```
 
-Carrega os modelos salvos, roda inferência ao vivo, mas o executor é `PaperExecutor`. Vê o que o bot **decidiria fazer**, simula saldos, mas zero dinheiro real envolvido. Útil para validar a estratégia em mercado live antes de plugar a carteira.
+Downloads 1000 real Binance candles, then iterates candle by candle simulating trades using the trained models — **no money spent**. Reports two key metrics:
 
-### 3. INVEST — dinheiro real 24/7
+| Metric | Description |
+|---|---|
+| **Directional accuracy** | % of forecaster predictions that matched the actual next-candle direction |
+| **Win rate** | % of closed trades that were profitable (after 0.1% fee per side) |
+
+The verdict at the end flags whether win rate is within the target range of **52%–75%**:
+- `[OK]` — within range, model is beating random consistently
+- `[BELOW]` — below 52%, consider more training or hyperparameter tuning
+- `[ABOVE]` — above 75%, suspect overfitting or data leakage
+
+### 3. INVEST — real money 24/7
 
 ```bash
 npm run invest
 ```
 
-Carrega os modelos, instancia `BinanceLiveExecutor` (testnet ou produção via env), e roda o loop até receber SIGINT/SIGTERM ou disparar o circuit breaker de drawdown.
+Loads the trained models, instantiates `BinanceLiveExecutor` (testnet or production via env), and runs the trading loop until `SIGINT`/`SIGTERM` or the drawdown circuit breaker triggers.
 
-**Proteções obrigatórias:**
-- `assertLiveExecutor()` — falha rápido se algum erro de fiação fizer cair em paper.
-- Circuit breaker — para tudo se drawdown > limite.
-- Position sizing — nunca arrisca mais que `MAX_POSITION_RISK_PCT` por trade.
-- Graceful shutdown — `SIGINT`/`SIGTERM` fecham o loop limpo.
+**Built-in safeguards:**
+- `assertLiveExecutor()` — fails fast if misconfiguration would fall back to paper.
+- Circuit breaker — halts all trading if drawdown exceeds `MAX_DAILY_DRAWDOWN_PCT`.
+- Position sizing — never risks more than `MAX_POSITION_RISK_PCT` per trade.
+- Graceful shutdown — `SIGINT`/`SIGTERM` close the loop cleanly.
 
 ## Setup
 
 ```bash
 cp .env.example .env
-# Edite .env com suas credenciais Binance
+# Edit .env with your Binance credentials and risk parameters
 npm install
 npm run train
-npm run test:strategy  # valide antes!
-npm run invest         # só depois de muita validação
+npm run test:strategy   # validate before going live!
+npm run invest          # only after thorough validation
 ```
 
-## Ordem recomendada de execução
+### Environment variables
 
-1. **train** → gera `./models/patchtst` e `./models/ppo`
-2. **test** → rode por dias. Avalie acurácia, P&L simulado.
-3. **invest com TESTNET** (`BINANCE_TESTNET=true`) → semanas de validação.
-4. **invest com valores pequenos** ($50–100) em produção real.
-5. Escale gradualmente apenas se métricas se mantiverem.
+| Variable | Description | Example |
+|---|---|---|
+| `TRADING_SYMBOL` | Trading pair | `BTC/USDT` |
+| `TRADING_TIMEFRAME` | Candle interval | `1h` |
+| `INITIAL_CAPITAL_USD` | Starting capital in USD | `1000` |
+| `MAX_POSITION_RISK_PCT` | Fraction of cash used per trade | `0.1` |
+| `STOP_LOSS_PCT` | Stop-loss threshold | `0.02` |
+| `MAX_DAILY_DRAWDOWN_PCT` | Circuit breaker threshold | `0.05` |
+| `BINANCE_API_KEY` | Binance API key (invest mode only) | — |
+| `BINANCE_API_SECRET` | Binance API secret (invest mode only) | — |
+| `BINANCE_TESTNET` | Use Binance testnet | `true` |
 
-## ⚠️ Disclaimer
+## Recommended execution order
 
-Este código é educacional. Trading algorítmico tem risco real de perda financeira total. Modelos de RL em mercados financeiros frequentemente apresentam ótimas métricas em backtest e fracassam em produção (overfitting, regime change, slippage não modelado). Audite, teste, valide. Não use dinheiro que você não pode perder.
+1. **train** → generates `./models/bilstm` and `./models/ppo`
+2. **test** → run the backtest, check that win rate is in the 52%–75% range
+3. **invest with testnet** (`BINANCE_TESTNET=true`) → weeks of validation
+4. **invest with small amounts** ($50–100) in real production
+5. Scale gradually only if metrics remain consistent
+
+## Disclaimer
+
+This code is educational. Algorithmic trading carries a real risk of total financial loss. RL models in financial markets frequently show strong backtest metrics and fail in production due to overfitting, regime change, and unmodeled slippage. Audit, test, validate. Do not use money you cannot afford to lose.

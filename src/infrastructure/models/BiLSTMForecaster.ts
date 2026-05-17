@@ -1,6 +1,8 @@
 import { tf } from "../tensorflow/tf";
 import type * as TF from "@tensorflow/tfjs-node";
-import { ForecastModel } from "../../domain/ports/ForecastModel";
+import {
+  ForecastModel, ForecastTrainOptions, ForecasterTrainingState,
+} from "../../domain/ports/ForecastModel";
 import { FeatureMatrix } from "../../domain/collections/FeatureMatrix";
 
 /**
@@ -58,7 +60,18 @@ export class BiLSTMForecaster implements ForecastModel {
     return result;
   }
 
-  async train(inputs: FeatureMatrix[], targets: number[][], epochs: number): Promise<void> {
+  async train(
+    inputs: FeatureMatrix[],
+    targets: number[][],
+    totalEpochs: number,
+    options?: ForecastTrainOptions
+  ): Promise<ForecasterTrainingState> {
+    const state: ForecasterTrainingState = options?.initialState
+      ? { ...options.initialState }
+      : { completedEpochs: 0, bestValLoss: Infinity, patienceCount: 0 };
+
+    if (state.completedEpochs >= totalEpochs) return state;
+
     if (!this.compiled) {
       this.model.compile({
         optimizer: tf.train.adam(this.config.learningRate),
@@ -67,43 +80,52 @@ export class BiLSTMForecaster implements ForecastModel {
       });
       this.compiled = true;
     }
+
+    const remainingEpochs = totalEpochs - state.completedEpochs;
     const xTensor = tf.tensor3d(inputs.map(m => m.toRawArray()));
     const yTensor = tf.tensor2d(targets);
     await this.model.fit(xTensor, yTensor, {
-      epochs,
+      epochs: remainingEpochs,
       batchSize: 32,
       validationSplit: 0.1,
       shuffle: true,
       verbose: 1,
-      callbacks: this.makeTrainingCallback(epochs),
+      callbacks: this.makeTrainingCallback(totalEpochs, state, options?.onEpochEnd),
     });
     tf.dispose([xTensor, yTensor]);
+    return state;
   }
 
   // Single callback combining cosine annealing (onEpochBegin) and early stopping (onEpochEnd).
-  // Before: mixing plain object + EarlyStopping instance caused tfjs to wrap them in
-  // CustomCallback, breaking `this.getMonitorValue is not a function`.
-  private makeTrainingCallback(totalEpochs: number): TF.CustomCallbackArgs {
+  // Uses an epoch offset so the cosine schedule and early-stopping memory survive a resume.
+  private makeTrainingCallback(
+    totalEpochs: number,
+    state: ForecasterTrainingState,
+    onEpochEnd?: (state: ForecasterTrainingState) => Promise<void>
+  ): TF.CustomCallbackArgs {
     const { learningRate, minLR, earlyStoppingPatience } = this.config;
     const MIN_DELTA = 1e-4;
-    let bestValLoss = Infinity;
-    let patienceCount = 0;
+    const epochOffset = state.completedEpochs;
     return {
-      onEpochBegin: async (epoch: number) => {
-        const cosine = 0.5 * (1 + Math.cos(Math.PI * epoch / totalEpochs));
+      onEpochBegin: async (localEpoch: number) => {
+        const globalEpoch = localEpoch + epochOffset;
+        const cosine = 0.5 * (1 + Math.cos(Math.PI * globalEpoch / totalEpochs));
         const lr = minLR + (learningRate - minLR) * cosine;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (this.model.optimizer as any).learningRate = lr;
       },
-      onEpochEnd: async (_epoch: number, logs?: TF.Logs) => {
+      onEpochEnd: async (localEpoch: number, logs?: TF.Logs) => {
+        state.completedEpochs = localEpoch + epochOffset + 1;
         const valLoss = logs?.["val_loss"];
-        if (typeof valLoss !== "number") return;
-        if (valLoss < bestValLoss - MIN_DELTA) {
-          bestValLoss = valLoss;
-          patienceCount = 0;
-        } else if (++patienceCount >= earlyStoppingPatience) {
-          this.model.stopTraining = true;
+        if (typeof valLoss === "number") {
+          if (valLoss < state.bestValLoss - MIN_DELTA) {
+            state.bestValLoss = valLoss;
+            state.patienceCount = 0;
+          } else if (++state.patienceCount >= earlyStoppingPatience) {
+            this.model.stopTraining = true;
+          }
         }
+        if (onEpochEnd) await onEpochEnd({ ...state });
       },
     };
   }
@@ -114,7 +136,8 @@ export class BiLSTMForecaster implements ForecastModel {
 
   async load(path: string): Promise<void> {
     this.model = await tf.loadLayersModel(`file://${path}/model.json`);
-    this.compiled = true;
+    // The reloaded model has no optimizer attached — recompile to make it trainable again.
+    this.compiled = false;
   }
 }
 

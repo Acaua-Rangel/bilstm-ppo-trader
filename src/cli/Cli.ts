@@ -44,9 +44,18 @@ Flags:
                           auto = GPU if available, else CPU.
                           Can also be set via TF_DEVICE env var.
 
+  --checkpoint=<dir>      [train only] Save and resume training from <dir>.
+                          If <dir> contains a previous checkpoint, training
+                          resumes from the exact epoch/episode, restoring
+                          LR schedule and early-stopping memory.
+
+  --checkpoint-every=<n>  [train only] Save a checkpoint every N epochs
+                          (forecaster) or episodes (agent). Default: 5.
+
 Usage:
   npm run train
   npm run train -- --device=gpu
+  npm run train -- --checkpoint=./checkpoints/run-1 --checkpoint-every=5
   npm run test:strategy -- --device=cpu
     `);
   }

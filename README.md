@@ -74,6 +74,38 @@ Training optimizations included:
 - Return clipping ±10% to remove flash crash outliers
 - Dynamic RL state: unrealized PnL, time in position, recent volatility
 
+#### Checkpoints (resume training)
+
+Long runs can be checkpointed and resumed:
+
+```bash
+# First run — saves every 5 epochs/episodes
+npm run train -- --checkpoint=./checkpoints/run-1
+
+# Interrupted? Run the same command again — it auto-resumes from the
+# last saved checkpoint (exact epoch, episode, LR, early-stopping memory).
+npm run train -- --checkpoint=./checkpoints/run-1
+
+# Custom frequency
+npm run train -- --checkpoint=./checkpoints/run-1 --checkpoint-every=10
+```
+
+What's preserved across a resume:
+- Forecaster: completed epochs, cosine-annealed LR, best `val_loss`, patience counter
+- Agent: completed episodes, `updateCount` (drives PPO LR decay)
+- Both: model weights
+
+Known limitation: the Adam optimizer's internal momentum is **not** preserved, so the first epoch after a resume may show slight gradient noise. The LR schedule itself is exact (derived from the epoch number, not optimizer state).
+
+Checkpoint directory layout:
+```
+./checkpoints/run-1/
+  metadata.json         counters, schedule state, input snapshot
+  forecaster/           BiLSTM weights
+  agent/policy/         PPO actor weights
+  agent/value/          PPO critic weights
+```
+
 ### 2. TEST — backtest with real data
 
 ```bash

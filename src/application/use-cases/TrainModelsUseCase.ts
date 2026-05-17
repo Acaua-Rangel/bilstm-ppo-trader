@@ -1,5 +1,5 @@
 import { MarketDataProvider } from "../../domain/ports/MarketDataProvider";
-import { ForecastModel } from "../../domain/ports/ForecastModel";
+import { ForecastModel, ForecasterTrainingState } from "../../domain/ports/ForecastModel";
 import { DecisionAgent } from "../../domain/ports/DecisionAgent";
 import { ModelStorage } from "../../domain/ports/ModelStorage";
 import { Logger } from "../../domain/ports/Logger";
@@ -8,6 +8,10 @@ import { TradingSymbol } from "../../domain/value-objects/TradingSymbol";
 import { CandleSeries } from "../../domain/collections/CandleSeries";
 import { FeatureMatrix } from "../../domain/collections/FeatureMatrix";
 import { TradingAction } from "../../domain/enums/TradingAction";
+import {
+  CheckpointManager, CheckpointData, AgentCheckpointState,
+  TrainInputSnapshot, TrainingPhase,
+} from "../../infrastructure/storage/CheckpointManager";
 
 // Warmup buffer for indicators (MACD needs ~50 candles, BB needs 20).
 const INDICATOR_WARMUP = 200;
@@ -19,17 +23,79 @@ const VOLATILITY_WINDOW = 20;
 /**
  * Use Case: trains the forecast model (BiLSTM) and decision agent (PPO).
  * TRAIN mode: never touches a real executor.
+ *
+ * Supports optional checkpointing: if `deps.checkpoint` is provided, training
+ * resumes from a saved state (if present) and saves a new checkpoint every
+ * `checkpointEveryN` epochs (forecaster) or episodes (agent).
  */
 export class TrainModelsUseCase {
   constructor(private readonly deps: TrainDependencies) {}
 
   async execute(input: TrainInput): Promise<void> {
     this.deps.logger.info("=== TRAINING MODE started ===");
+    const resumed = await this.tryLoadCheckpoint(input);
     const series = await this.fetchHistory(input);
-    await this.trainForecaster(series, input);
-    await this.trainAgent(series, input);
+
+    const forecasterState: ForecasterTrainingState = resumed?.forecaster ?? {
+      completedEpochs: 0, bestValLoss: Infinity, patienceCount: 0,
+    };
+    const agentState: AgentCheckpointState = resumed?.agent ?? {
+      completedEpisodes: 0, updateCount: 0,
+    };
+    const createdAt = resumed?.createdAt ?? new Date().toISOString();
+
+    const finalForecaster = await this.maybeTrainForecaster(
+      series, input, forecasterState, agentState, createdAt
+    );
+
+    const finalAgent = await this.maybeTrainAgent(
+      series, input, finalForecaster, agentState, createdAt
+    );
+
     await this.persistArtifacts(input);
+    await this.saveCheckpoint("done", input, finalForecaster, finalAgent, createdAt);
     this.deps.logger.info("Training complete");
+  }
+
+  private async tryLoadCheckpoint(input: TrainInput): Promise<CheckpointData | null> {
+    const ckpt = this.deps.checkpoint;
+    if (!ckpt) return null;
+    if (!ckpt.exists()) {
+      this.deps.logger.info(`No checkpoint found at ${ckpt.directory}, starting fresh`);
+      return null;
+    }
+    const data = await ckpt.load();
+    if (!data) return null;
+    this.deps.logger.info(`Resuming from checkpoint at ${ckpt.directory}`, {
+      phase: data.phase,
+      forecasterEpoch: data.forecaster.completedEpochs,
+      agentEpisode: data.agent.completedEpisodes,
+      updateCount: data.agent.updateCount,
+    });
+    this.warnIfInputChanged(input, data.input);
+    return data;
+  }
+
+  private warnIfInputChanged(current: TrainInput, saved: TrainInputSnapshot): void {
+    const log = this.deps.logger;
+    if (current.symbol.toString() !== saved.symbol) {
+      log.warn(`symbol changed: ${saved.symbol} → ${current.symbol.toString()}`);
+    }
+    if (current.historicalCandles !== saved.historicalCandles) {
+      log.warn(`historicalCandles changed: ${saved.historicalCandles} → ${current.historicalCandles}`);
+    }
+    if (current.windowSize !== saved.windowSize) {
+      log.warn(`windowSize changed: ${saved.windowSize} → ${current.windowSize}`);
+    }
+    if (current.horizon !== saved.horizon) {
+      log.warn(`horizon changed: ${saved.horizon} → ${current.horizon}`);
+    }
+    if (current.forecastEpochs !== saved.forecastEpochs) {
+      log.warn(`forecastEpochs changed: ${saved.forecastEpochs} → ${current.forecastEpochs}`);
+    }
+    if (current.rlEpisodes !== saved.rlEpisodes) {
+      log.warn(`rlEpisodes changed: ${saved.rlEpisodes} → ${current.rlEpisodes}`);
+    }
   }
 
   private async fetchHistory(input: TrainInput): Promise<CandleSeries> {
@@ -39,11 +105,100 @@ export class TrainModelsUseCase {
     );
   }
 
-  private async trainForecaster(series: CandleSeries, input: TrainInput): Promise<void> {
-    this.deps.logger.info("Training forecast model");
+  private async maybeTrainForecaster(
+    series: CandleSeries, input: TrainInput,
+    state: ForecasterTrainingState, agentState: AgentCheckpointState,
+    createdAt: string
+  ): Promise<ForecasterTrainingState> {
+    if (state.completedEpochs >= input.forecastEpochs) {
+      this.deps.logger.info("Forecaster already at target epochs (skipping)");
+      return state;
+    }
+    this.deps.logger.info(
+      `Training forecast model (from epoch ${state.completedEpochs} of ${input.forecastEpochs})`
+    );
     const { inputs, targets } = this.buildTrainingSet(series, input);
     this.deps.logger.info(`Training samples: ${inputs.length}`);
-    await this.deps.forecastModel.train(inputs, targets, input.forecastEpochs);
+
+    return await this.deps.forecastModel.train(
+      inputs, targets, input.forecastEpochs,
+      {
+        initialState: state,
+        onEpochEnd: async (current) => {
+          if (this.shouldCheckpointAt(current.completedEpochs, input.forecastEpochs)) {
+            await this.saveCheckpoint("forecaster", input, current, agentState, createdAt);
+            this.deps.logger.info(
+              `Checkpoint saved (forecaster epoch ${current.completedEpochs}/${input.forecastEpochs})`
+            );
+          }
+        },
+      }
+    );
+  }
+
+  private async maybeTrainAgent(
+    series: CandleSeries, input: TrainInput,
+    forecasterState: ForecasterTrainingState,
+    state: AgentCheckpointState, createdAt: string
+  ): Promise<AgentCheckpointState> {
+    if (state.completedEpisodes >= input.rlEpisodes) {
+      this.deps.logger.info("Agent already at target episodes (skipping)");
+      return state;
+    }
+    this.deps.agent.restoreTrainingState({ updateCount: state.updateCount });
+    this.deps.logger.info(
+      `Training agent for ${input.rlEpisodes} episodes (from episode ${state.completedEpisodes})`
+    );
+    let current = { ...state };
+    for (let episode = state.completedEpisodes; episode < input.rlEpisodes; episode++) {
+      await this.runOneEpisode(series, input);
+      const agentInternal = this.deps.agent.getTrainingState();
+      current = {
+        completedEpisodes: episode + 1,
+        updateCount: agentInternal.updateCount,
+      };
+      this.deps.logger.info(`Episode ${episode + 1}/${input.rlEpisodes} complete`);
+      if (this.shouldCheckpointAt(current.completedEpisodes, input.rlEpisodes)) {
+        await this.saveCheckpoint("agent", input, forecasterState, current, createdAt);
+        this.deps.logger.info(
+          `Checkpoint saved (agent episode ${current.completedEpisodes}/${input.rlEpisodes})`
+        );
+      }
+    }
+    return current;
+  }
+
+  private shouldCheckpointAt(step: number, total: number): boolean {
+    if (!this.deps.checkpoint) return false;
+    if (step === total) return true; // always checkpoint final step of a phase
+    return step % this.deps.checkpointEveryN === 0;
+  }
+
+  private async saveCheckpoint(
+    phase: TrainingPhase, input: TrainInput,
+    forecaster: ForecasterTrainingState,
+    agent: AgentCheckpointState,
+    createdAt: string
+  ): Promise<void> {
+    if (!this.deps.checkpoint) return;
+    await this.deps.checkpoint.save({
+      createdAt,
+      phase,
+      input: this.snapshotInput(input),
+      forecaster,
+      agent,
+    });
+  }
+
+  private snapshotInput(input: TrainInput): TrainInputSnapshot {
+    return {
+      symbol: input.symbol.toString(),
+      historicalCandles: input.historicalCandles,
+      windowSize: input.windowSize,
+      horizon: input.horizon,
+      forecastEpochs: input.forecastEpochs,
+      rlEpisodes: input.rlEpisodes,
+    };
   }
 
   private buildTrainingSet(series: CandleSeries, input: TrainInput): TrainingSet {
@@ -70,14 +225,6 @@ export class TrainModelsUseCase {
       returns.push(Math.max(-RETURN_CLIP, Math.min(RETURN_CLIP, rawReturn)));
     }
     return returns;
-  }
-
-  private async trainAgent(series: CandleSeries, input: TrainInput): Promise<void> {
-    this.deps.logger.info(`Training agent for ${input.rlEpisodes} episodes`);
-    for (let episode = 0; episode < input.rlEpisodes; episode++) {
-      await this.runOneEpisode(series, input);
-      this.deps.logger.info(`Episode ${episode + 1}/${input.rlEpisodes} complete`);
-    }
   }
 
   private async runOneEpisode(series: CandleSeries, input: TrainInput): Promise<void> {
@@ -186,6 +333,8 @@ export interface TrainDependencies {
   storage: ModelStorage;
   logger: Logger;
   featureBuilder: FeatureBuilder;
+  checkpoint?: CheckpointManager;
+  checkpointEveryN: number;
 }
 
 export interface TrainInput {

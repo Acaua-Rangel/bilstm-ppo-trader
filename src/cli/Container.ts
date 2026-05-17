@@ -6,6 +6,7 @@ import { ConservativeRiskPolicy } from "../infrastructure/risk/ConservativeRiskP
 import { PaperExecutor } from "../infrastructure/execution/PaperExecutor";
 import { BinanceLiveExecutor } from "../infrastructure/execution/BinanceLiveExecutor";
 import { FileModelStorage } from "../infrastructure/storage/FileModelStorage";
+import { CheckpointManager } from "../infrastructure/storage/CheckpointManager";
 import { FeatureBuilder } from "../application/services/FeatureBuilder";
 import { TradingCycle } from "../application/services/TradingCycle";
 import { TradingSymbol } from "../domain/value-objects/TradingSymbol";
@@ -51,6 +52,10 @@ export class Container {
       apiSecret: this.env.binanceApiSecret,
       testnet: this.env.binanceTestnet,
     }, this.logger);
+  }
+
+  buildCheckpointManager(directory: string): CheckpointManager {
+    return new CheckpointManager(directory, this.storage);
   }
 
   buildTradingCycle(executor: TradeExecutor): TradingCycle {

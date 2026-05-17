@@ -1,6 +1,8 @@
 import { tf } from "../tensorflow/tf";
 import type * as TF from "@tensorflow/tfjs-node";
-import { DecisionAgent, AgentDecision, AgentExperience } from "../../domain/ports/DecisionAgent";
+import {
+  DecisionAgent, AgentDecision, AgentExperience, AgentTrainingState,
+} from "../../domain/ports/DecisionAgent";
 import { TradingAction } from "../../domain/enums/TradingAction";
 
 /**
@@ -84,6 +86,15 @@ export class PPODecisionAgent implements DecisionAgent {
     await this.runPPOEpochs(advantages, returns);
     this.experiences = [];
     this.updateCount++;
+    this.decayLR();
+  }
+
+  getTrainingState(): AgentTrainingState {
+    return { updateCount: this.updateCount };
+  }
+
+  restoreTrainingState(state: AgentTrainingState): void {
+    this.updateCount = state.updateCount;
     this.decayLR();
   }
 

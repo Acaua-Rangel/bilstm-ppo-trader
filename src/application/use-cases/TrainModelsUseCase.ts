@@ -21,9 +21,10 @@ const RETURN_CLIP = 0.1;
 const VOLATILITY_WINDOW = 20;
 // Trading fee on each side (matches backtest and exchange reality).
 const FEE_RATE = 0.001;
-// Skip the most recent N candles when fetching training data so they remain
-// strictly out-of-sample for the backtest. Backtest then fetches these same
-// N candles via endOffsetCandles=0 (default).
+// The last N candles of the downloaded series are held out for the backtest.
+// Training uses the earlier portion; backtest uses the later portion.
+// Both come from the same single download, so the split is internal and
+// the training window always includes the most recent data possible.
 const BACKTEST_HOLDOUT_CANDLES = 1000;
 
 /**
@@ -33,14 +34,25 @@ const BACKTEST_HOLDOUT_CANDLES = 1000;
  * Short-term, long-only trading: the agent can only enter long (BUY) and
  * exit long (SELL). No short selling. Stop loss is enforced during training
  * to mirror the backtest and live trading environment.
+ *
+ * Performance: features and forecasts are precomputed once and reused across
+ * all PPO episodes (the forecaster is frozen during PPO). This eliminates
+ * hundreds of thousands of batch=1 GPU calls, letting the GPU actually saturate.
  */
 export class TrainModelsUseCase {
+  private cachedFeatures: FeatureMatrix[] | null = null;
+  private cachedTargets: number[][] | null = null;
+  private cachedForecasts: number[][] | null = null;
+  private cachedVolatility: number[] | null = null;
+
   constructor(private readonly deps: TrainDependencies) {}
 
   async execute(input: TrainInput): Promise<void> {
     this.deps.logger.info("=== TRAINING MODE started ===");
     const resumed = await this.tryLoadCheckpoint(input);
     const series = await this.fetchHistory(input);
+
+    this.precomputeFeaturesAndVolatility(series, input);
 
     const forecasterState: ForecasterTrainingState = resumed?.forecaster ?? {
       completedEpochs: 0, bestValLoss: Infinity, patienceCount: 0,
@@ -51,8 +63,10 @@ export class TrainModelsUseCase {
     const createdAt = resumed?.createdAt ?? new Date().toISOString();
 
     const finalForecaster = await this.maybeTrainForecaster(
-      series, input, forecasterState, agentState, createdAt
+      input, forecasterState, agentState, createdAt
     );
+
+    await this.precomputeForecasts();
 
     const finalAgent = await this.maybeTrainAgent(
       series, input, finalForecaster, agentState, createdAt
@@ -105,17 +119,78 @@ export class TrainModelsUseCase {
   }
 
   private async fetchHistory(input: TrainInput): Promise<CandleSeries> {
+    const total = input.historicalCandles + BACKTEST_HOLDOUT_CANDLES;
     this.deps.logger.info(
-      `Downloading ${input.historicalCandles} candles ` +
-      `(skipping last ${BACKTEST_HOLDOUT_CANDLES} as backtest holdout)`
+      `Downloading ${total} candles (${input.historicalCandles} train + ${BACKTEST_HOLDOUT_CANDLES} holdout)`
     );
-    return await this.deps.marketData.fetchRecentCandles(
-      input.symbol, input.historicalCandles, BACKTEST_HOLDOUT_CANDLES
-    );
+    const full = await this.deps.marketData.fetchRecentCandles(input.symbol, total, 0);
+    return full.rangeFromIndex(0, full.size() - BACKTEST_HOLDOUT_CANDLES);
+  }
+
+  /**
+   * One-time CPU work: compute feature matrices, future returns, and volatility
+   * for every step. These don't depend on model state and are reused across
+   * forecaster training, PPO precompute, and every PPO episode.
+   */
+  private precomputeFeaturesAndVolatility(series: CandleSeries, input: TrainInput): void {
+    if (this.cachedFeatures && this.cachedTargets && this.cachedVolatility) return;
+    this.deps.logger.info("Precomputing features, targets, and volatility...");
+    const t0 = Date.now();
+    const features: FeatureMatrix[] = [];
+    const targets: number[][] = [];
+    for (let i = input.windowSize; i < series.size() - input.horizon; i++) {
+      const windowStart = Math.max(0, i - input.windowSize - INDICATOR_WARMUP);
+      const window = series.rangeFromIndex(windowStart, i);
+      features.push(this.deps.featureBuilder.build(window));
+      targets.push(this.buildFutureReturns(series, i, input.horizon));
+    }
+    this.cachedFeatures = features;
+    this.cachedTargets = targets;
+    this.cachedVolatility = this.computeVolatilitySeries(series);
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+    this.deps.logger.info(`Cached ${features.length} feature matrices in ${elapsed}s`);
+  }
+
+  private computeVolatilitySeries(series: CandleSeries): number[] {
+    const vol = new Array(series.size()).fill(0);
+    for (let i = 1; i < series.size(); i++) {
+      const start = Math.max(1, i - VOLATILITY_WINDOW);
+      let sum = 0;
+      let count = 0;
+      for (let k = start; k <= i; k++) {
+        const prev = series.at(k - 1).closePrice().toNumber();
+        const curr = series.at(k).closePrice().toNumber();
+        sum += (curr - prev) / prev;
+        count++;
+      }
+      const mean = sum / count;
+      let varSum = 0;
+      for (let k = start; k <= i; k++) {
+        const prev = series.at(k - 1).closePrice().toNumber();
+        const curr = series.at(k).closePrice().toNumber();
+        const r = (curr - prev) / prev;
+        varSum += (r - mean) ** 2;
+      }
+      vol[i] = Math.sqrt(varSum / count);
+    }
+    return vol;
+  }
+
+  /**
+   * Single batched GPU call for all forecasts, after the BiLSTM is trained.
+   * Replaces ~750k individual batch=1 predict() calls inside the PPO loop.
+   */
+  private async precomputeForecasts(): Promise<void> {
+    if (!this.cachedFeatures) throw new Error("Features must be precomputed first");
+    this.deps.logger.info(`Precomputing ${this.cachedFeatures.length} forecasts in batch...`);
+    const t0 = Date.now();
+    this.cachedForecasts = await this.deps.forecastModel.predictBatch(this.cachedFeatures);
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+    this.deps.logger.info(`Forecasts cached in ${elapsed}s`);
   }
 
   private async maybeTrainForecaster(
-    series: CandleSeries, input: TrainInput,
+    input: TrainInput,
     state: ForecasterTrainingState, agentState: AgentCheckpointState,
     createdAt: string
   ): Promise<ForecasterTrainingState> {
@@ -126,7 +201,8 @@ export class TrainModelsUseCase {
     this.deps.logger.info(
       `Training forecast model (from epoch ${state.completedEpochs} of ${input.forecastEpochs})`
     );
-    const { inputs, targets } = this.buildTrainingSet(series, input);
+    const inputs = this.cachedFeatures!;
+    const targets = this.cachedTargets!;
     this.deps.logger.info(`Training samples: ${inputs.length}`);
 
     return await this.deps.forecastModel.train(
@@ -160,13 +236,15 @@ export class TrainModelsUseCase {
     );
     let current = { ...state };
     for (let episode = state.completedEpisodes; episode < input.rlEpisodes; episode++) {
+      const t0 = Date.now();
       await this.runOneEpisode(series, input);
       const agentInternal = this.deps.agent.getTrainingState();
       current = {
         completedEpisodes: episode + 1,
         updateCount: agentInternal.updateCount,
       };
-      this.deps.logger.info(`Episode ${episode + 1}/${input.rlEpisodes} complete`);
+      const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+      this.deps.logger.info(`Episode ${episode + 1}/${input.rlEpisodes} complete (${elapsed}s)`);
       if (this.shouldCheckpointAt(current.completedEpisodes, input.rlEpisodes)) {
         await this.saveCheckpoint("agent", input, forecasterState, current, createdAt);
         this.deps.logger.info(
@@ -179,7 +257,7 @@ export class TrainModelsUseCase {
 
   private shouldCheckpointAt(step: number, total: number): boolean {
     if (!this.deps.checkpoint) return false;
-    if (step === total) return true; // always checkpoint final step of a phase
+    if (step === total) return true;
     return step % this.deps.checkpointEveryN === 0;
   }
 
@@ -210,18 +288,6 @@ export class TrainModelsUseCase {
     };
   }
 
-  private buildTrainingSet(series: CandleSeries, input: TrainInput): TrainingSet {
-    const inputs: FeatureMatrix[] = [];
-    const targets: number[][] = [];
-    for (let i = input.windowSize; i < series.size() - input.horizon; i++) {
-      const windowStart = Math.max(0, i - input.windowSize - INDICATOR_WARMUP);
-      const window = series.rangeFromIndex(windowStart, i);
-      inputs.push(this.deps.featureBuilder.build(window));
-      targets.push(this.buildFutureReturns(series, i, input.horizon));
-    }
-    return { inputs, targets };
-  }
-
   private buildFutureReturns(series: CandleSeries, anchorIndex: number, horizon: number): number[] {
     const anchorClose = series.at(anchorIndex).closePrice().toNumber();
     const returns: number[] = [];
@@ -235,12 +301,14 @@ export class TrainModelsUseCase {
 
   private async runOneEpisode(series: CandleSeries, input: TrainInput): Promise<void> {
     const ctx: PositionContext = { position: 0, entryPrice: 0, barsInPosition: 0 };
-    for (let i = input.windowSize; i < series.size() - input.horizon; i++) {
-      const windowStart = Math.max(0, i - input.windowSize - INDICATOR_WARMUP);
-      const window = series.rangeFromIndex(windowStart, i);
-      const features = this.deps.featureBuilder.build(window);
-      const forecast = await this.deps.forecastModel.predict(features);
-      const state = this.assembleState(series, i, forecast, ctx);
+    const forecasts = this.cachedForecasts!;
+    const volatility = this.cachedVolatility!;
+    const offset = input.windowSize;
+    const end = series.size() - input.horizon;
+    for (let i = offset; i < end; i++) {
+      const idx = i - offset;
+      const forecast = forecasts[idx];
+      const state = this.assembleState(series, i, forecast, ctx, volatility[i]);
       const decision = await this.deps.agent.decide(state);
 
       const currentClose = series.at(i).closePrice().toNumber();
@@ -252,7 +320,7 @@ export class TrainModelsUseCase {
         state, actionCode: decision.action.toCode(), reward,
         logProbability: decision.logProbability,
         estimatedValue: decision.estimatedValue,
-        isTerminal: i === series.size() - input.horizon - 1,
+        isTerminal: i === end - 1,
       });
     }
     await this.deps.agent.updatePolicy();
@@ -260,21 +328,22 @@ export class TrainModelsUseCase {
 
   private assembleState(
     series: CandleSeries, i: number,
-    forecast: ReadonlyArray<number>, ctx: PositionContext
+    forecast: ReadonlyArray<number>, ctx: PositionContext,
+    volatility: number
   ): ReadonlyArray<number> {
     const candle = series.at(i);
     const close = candle.closePrice().toNumber();
     const unrealizedPnL = this.computeUnrealizedPnL(close, ctx);
     return [
-      1 - ctx.position,                                // cash ratio (1 = flat)
-      unrealizedPnL,                                   // unrealized PnL (0 if flat)
-      Math.min(ctx.barsInPosition / 100, 1),           // normalized time in position
+      1 - ctx.position,
+      unrealizedPnL,
+      Math.min(ctx.barsInPosition / 100, 1),
       (candle.openPrice().toNumber() - close) / close,
       (candle.highPrice().toNumber() - close) / close,
       (candle.lowPrice().toNumber() - close) / close,
       candle.range() / close,
-      ctx.position,                                    // 1 if long, 0 if flat
-      this.recentVolatility(series, i),
+      ctx.position,
+      volatility,
       ...forecast.slice(0, 4),
     ];
   }
@@ -282,19 +351,6 @@ export class TrainModelsUseCase {
   private computeUnrealizedPnL(currentClose: number, ctx: PositionContext): number {
     if (ctx.position === 0 || ctx.entryPrice === 0) return 0;
     return (currentClose - ctx.entryPrice) / ctx.entryPrice;
-  }
-
-  private recentVolatility(series: CandleSeries, i: number): number {
-    const start = Math.max(1, i - VOLATILITY_WINDOW);
-    const returns: number[] = [];
-    for (let k = start; k <= i; k++) {
-      const prev = series.at(k - 1).closePrice().toNumber();
-      const curr = series.at(k).closePrice().toNumber();
-      returns.push((curr - prev) / prev);
-    }
-    const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
-    const variance = returns.reduce((s, r) => s + (r - mean) ** 2, 0) / returns.length;
-    return Math.sqrt(variance);
   }
 
   private applyStopLoss(
@@ -309,10 +365,10 @@ export class TrainModelsUseCase {
 
   /**
    * Long-only reward, in units of next-candle return:
-   *   in position + HOLD/BUY  → priceReturn - feeDrag (continue holding)
+   *   in position + HOLD/BUY  → priceReturn (continue holding)
    *   in position + SELL      → realized PnL on exit (closes the trade)
-   *   flat + BUY              → priceReturn - feeEntry (entry reward)
-   *   flat + SELL/HOLD        → small idle penalty (invalid SELL or no signal)
+   *   flat + BUY              → priceReturn − fee (entry reward)
+   *   flat + SELL/HOLD        → small idle penalty
    */
   private computeReward(
     series: CandleSeries, i: number,
@@ -348,12 +404,6 @@ export class TrainModelsUseCase {
     }
   }
 
-  /**
-   * Long-only state machine:
-   *   flat (0) + BUY  → long (1)
-   *   long (1) + SELL → flat (0)
-   *   all other transitions: no change.
-   */
   private nextPosition(action: TradingAction, currentPosition: number): number {
     if (currentPosition === 0 && action.isBuy()) return 1;
     if (currentPosition === 1 && action.isSell()) return 0;
@@ -388,11 +438,6 @@ export interface TrainInput {
   forecastModelPath: string;
   agentPath: string;
   stopLossPct: number;
-}
-
-interface TrainingSet {
-  inputs: FeatureMatrix[];
-  targets: number[][];
 }
 
 interface PositionContext {

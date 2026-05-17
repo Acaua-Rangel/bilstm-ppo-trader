@@ -60,6 +60,28 @@ export class BiLSTMForecaster implements ForecastModel {
     return result;
   }
 
+  /**
+   * Batch prediction. Processes inputs in chunks to keep GPU memory bounded
+   * while still saturating the device far better than batch=1 calls.
+   */
+  async predictBatch(features: FeatureMatrix[]): Promise<number[][]> {
+    if (features.length === 0) return [];
+    const CHUNK = 512;
+    const horizon = this.config.horizon;
+    const results: number[][] = [];
+    for (let start = 0; start < features.length; start += CHUNK) {
+      const slice = features.slice(start, start + CHUNK);
+      const inputTensor = tf.tensor3d(slice.map(m => m.toRawArray()));
+      const output = this.model.predict(inputTensor) as TF.Tensor;
+      const flat = Array.from(await output.data());
+      tf.dispose([inputTensor, output]);
+      for (let i = 0; i < slice.length; i++) {
+        results.push(flat.slice(i * horizon, (i + 1) * horizon));
+      }
+    }
+    return results;
+  }
+
   async train(
     inputs: FeatureMatrix[],
     targets: number[][],
@@ -86,7 +108,7 @@ export class BiLSTMForecaster implements ForecastModel {
     const yTensor = tf.tensor2d(targets);
     await this.model.fit(xTensor, yTensor, {
       epochs: remainingEpochs,
-      batchSize: 32,
+      batchSize: 256,
       validationSplit: 0.1,
       shuffle: true,
       verbose: 1,

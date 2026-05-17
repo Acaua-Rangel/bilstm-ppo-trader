@@ -6,6 +6,12 @@ import { FeatureMatrix } from "../collections/FeatureMatrix";
  */
 export interface ForecastModel {
   predict(features: FeatureMatrix): Promise<ReadonlyArray<number>>;
+  /**
+   * Batch prediction — processes many feature matrices in a single GPU call.
+   * Used during PPO training to avoid 700k+ individual batch=1 GPU launches.
+   * Returns one forecast (length `horizon`) per input.
+   */
+  predictBatch(features: FeatureMatrix[]): Promise<number[][]>;
   train(
     inputs: FeatureMatrix[],
     targets: number[][],

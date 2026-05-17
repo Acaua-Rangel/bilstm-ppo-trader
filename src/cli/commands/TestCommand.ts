@@ -11,12 +11,14 @@ export class TestCommand implements Command {
   constructor(private readonly container: Container) {}
 
   async execute(): Promise<void> {
+    const env = this.container.environment;
     const useCase = new BacktestUseCase({
       marketData: this.container.marketData,
       forecastModel: this.container.forecaster,
       agent: this.container.agent,
       storage: this.container.storage,
       logger: this.container.logger,
+      risk: this.container.risk,
       featureBuilder: this.container.featureBuilder,
     });
     await useCase.execute({
@@ -26,6 +28,8 @@ export class TestCommand implements Command {
       forecastModelPath: "./models/bilstm",
       agentPath: "./models/ppo",
       initialCapital: this.container.initialCapital.toNumber(),
+      maxPositionRiskPct: env.maxPositionRiskPct,
+      stopLossPct: env.stopLossPct,
     });
   }
 }

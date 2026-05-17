@@ -30,7 +30,10 @@ export class Container {
   readonly symbol: TradingSymbol;
   readonly initialCapital: Money;
 
+  readonly environment: Environment;
+
   constructor(private readonly env: Environment) {
+    this.environment = env;
     this.symbol = TradingSymbol.of(env.tradingSymbol);
     this.initialCapital = Money.of(env.initialCapitalUsd);
     this.logger = new ConsoleLogger();
@@ -64,7 +67,7 @@ export class Container {
       executor, forecastModel: this.forecaster,
       agent: this.agent, risk: this.risk,
       logger: this.logger, featureBuilder: this.featureBuilder,
-    }, { symbol: this.symbol });
+    }, { symbol: this.symbol, stopLossPct: this.env.stopLossPct });
   }
 
   private biLSTMConfig() {
@@ -72,15 +75,15 @@ export class Container {
       seqLen: 64, numFeatures: 10,
       hiddenUnits: 64, dropout: 0.2, horizon: 4,
       learningRate: 1e-3, minLR: 1e-5,
-      l2: 1e-4, earlyStoppingPatience: 8,
+      l2: 1e-4, earlyStoppingPatience: 15,
     };
   }
 
   private ppoConfig() {
     return {
-      stateSize: 14, actionSize: 3, gamma: 0.99,
+      stateSize: 13, actionSize: 3, gamma: 0.99,
       clipRatio: 0.2, policyLR: 3e-4, valueLR: 1e-3,
-      minLR: 1e-5, lrDecay: 0.95, maxGradNorm: 0.5, epochs: 10,
+      minLR: 1e-5, lrDecay: 0.99, maxGradNorm: 0.5, epochs: 10,
     };
   }
 

@@ -6,5 +6,15 @@ import { TradingSymbol } from "../value-objects/TradingSymbol";
  * Interface Segregation: client depends only on what it needs.
  */
 export interface MarketDataProvider {
-  fetchRecentCandles(symbol: TradingSymbol, limit: number): Promise<CandleSeries>;
+  /**
+   * Fetches `limit` candles ending `endOffsetCandles` before the most recent
+   * available candle. When `endOffsetCandles` is 0/undefined, returns the
+   * most recent `limit` candles. Used to keep training data and backtest
+   * data disjoint (no data leakage).
+   */
+  fetchRecentCandles(
+    symbol: TradingSymbol,
+    limit: number,
+    endOffsetCandles?: number
+  ): Promise<CandleSeries>;
 }

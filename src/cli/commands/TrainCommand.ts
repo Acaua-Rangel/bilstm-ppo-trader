@@ -19,13 +19,14 @@ export class TrainCommand implements Command {
     const useCase = this.buildUseCase();
     await useCase.execute({
       symbol: this.container.symbol,
-      historicalCandles: 5000,
+      historicalCandles: 15000,
       windowSize: 64,
       horizon: 4,
-      forecastEpochs: 50,
-      rlEpisodes: 30,
+      forecastEpochs: 100,
+      rlEpisodes: 50,
       forecastModelPath: "./models/bilstm",
       agentPath: "./models/ppo",
+      stopLossPct: this.container.environment.stopLossPct,
     });
   }
 

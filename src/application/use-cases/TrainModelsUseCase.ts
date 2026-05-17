@@ -19,14 +19,20 @@ const INDICATOR_WARMUP = 200;
 const RETURN_CLIP = 0.1;
 // Window for computing volatility in the agent state.
 const VOLATILITY_WINDOW = 20;
+// Trading fee on each side (matches backtest and exchange reality).
+const FEE_RATE = 0.001;
+// Skip the most recent N candles when fetching training data so they remain
+// strictly out-of-sample for the backtest. Backtest then fetches these same
+// N candles via endOffsetCandles=0 (default).
+const BACKTEST_HOLDOUT_CANDLES = 1000;
 
 /**
  * Use Case: trains the forecast model (BiLSTM) and decision agent (PPO).
  * TRAIN mode: never touches a real executor.
  *
- * Supports optional checkpointing: if `deps.checkpoint` is provided, training
- * resumes from a saved state (if present) and saves a new checkpoint every
- * `checkpointEveryN` epochs (forecaster) or episodes (agent).
+ * Short-term, long-only trading: the agent can only enter long (BUY) and
+ * exit long (SELL). No short selling. Stop loss is enforced during training
+ * to mirror the backtest and live trading environment.
  */
 export class TrainModelsUseCase {
   constructor(private readonly deps: TrainDependencies) {}
@@ -99,9 +105,12 @@ export class TrainModelsUseCase {
   }
 
   private async fetchHistory(input: TrainInput): Promise<CandleSeries> {
-    this.deps.logger.info(`Downloading ${input.historicalCandles} candles`);
+    this.deps.logger.info(
+      `Downloading ${input.historicalCandles} candles ` +
+      `(skipping last ${BACKTEST_HOLDOUT_CANDLES} as backtest holdout)`
+    );
     return await this.deps.marketData.fetchRecentCandles(
-      input.symbol, input.historicalCandles
+      input.symbol, input.historicalCandles, BACKTEST_HOLDOUT_CANDLES
     );
   }
 
@@ -205,8 +214,6 @@ export class TrainModelsUseCase {
     const inputs: FeatureMatrix[] = [];
     const targets: number[][] = [];
     for (let i = input.windowSize; i < series.size() - input.horizon; i++) {
-      // Bounded window: indicator warmup + windowSize for features.
-      // Before: rangeFromIndex(0, i) recomputed EMA/RSI/MACD over the full growing series (O(n²)).
       const windowStart = Math.max(0, i - input.windowSize - INDICATOR_WARMUP);
       const window = series.rangeFromIndex(windowStart, i);
       inputs.push(this.deps.featureBuilder.build(window));
@@ -221,7 +228,6 @@ export class TrainModelsUseCase {
     for (let h = 1; h <= horizon; h++) {
       const futureClose = series.at(anchorIndex + h).closePrice().toNumber();
       const rawReturn = (futureClose - anchorClose) / anchorClose;
-      // Clipping prevents extreme outliers from dominating the gradient.
       returns.push(Math.max(-RETURN_CLIP, Math.min(RETURN_CLIP, rawReturn)));
     }
     return returns;
@@ -236,8 +242,12 @@ export class TrainModelsUseCase {
       const forecast = await this.deps.forecastModel.predict(features);
       const state = this.assembleState(series, i, forecast, ctx);
       const decision = await this.deps.agent.decide(state);
-      const reward = this.computeReward(series, i, decision.action, ctx.position);
-      this.updateContext(ctx, decision.action, series.at(i).closePrice().toNumber());
+
+      const currentClose = series.at(i).closePrice().toNumber();
+      const effectiveAction = this.applyStopLoss(decision.action, ctx, currentClose, input.stopLossPct);
+      const reward = this.computeReward(series, i, effectiveAction, ctx);
+      this.updateContext(ctx, effectiveAction, currentClose);
+
       this.deps.agent.recordExperience({
         state, actionCode: decision.action.toCode(), reward,
         logProbability: decision.logProbability,
@@ -256,24 +266,22 @@ export class TrainModelsUseCase {
     const close = candle.closePrice().toNumber();
     const unrealizedPnL = this.computeUnrealizedPnL(close, ctx);
     return [
-      1 - Math.abs(ctx.position),                      // cash ratio (1 = no position)
-      unrealizedPnL,                                   // unrealized PnL
-      Math.min(ctx.barsInPosition / 100, 1),           // time in position (normalized)
+      1 - ctx.position,                                // cash ratio (1 = flat)
+      unrealizedPnL,                                   // unrealized PnL (0 if flat)
+      Math.min(ctx.barsInPosition / 100, 1),           // normalized time in position
       (candle.openPrice().toNumber() - close) / close,
       (candle.highPrice().toNumber() - close) / close,
       (candle.lowPrice().toNumber() - close) / close,
       candle.range() / close,
-      ctx.position === 1 ? 1 : 0,
-      ctx.position === -1 ? 1 : 0,
-      this.recentVolatility(series, i),                // recent volatility
+      ctx.position,                                    // 1 if long, 0 if flat
+      this.recentVolatility(series, i),
       ...forecast.slice(0, 4),
     ];
   }
 
   private computeUnrealizedPnL(currentClose: number, ctx: PositionContext): number {
     if (ctx.position === 0 || ctx.entryPrice === 0) return 0;
-    const rawPnL = (currentClose - ctx.entryPrice) / ctx.entryPrice;
-    return ctx.position === 1 ? rawPnL : -rawPnL;
+    return (currentClose - ctx.entryPrice) / ctx.entryPrice;
   }
 
   private recentVolatility(series: CandleSeries, i: number): number {
@@ -289,33 +297,66 @@ export class TrainModelsUseCase {
     return Math.sqrt(variance);
   }
 
+  private applyStopLoss(
+    action: TradingAction, ctx: PositionContext,
+    currentClose: number, stopLossPct: number
+  ): TradingAction {
+    if (ctx.position !== 1) return action;
+    const pnl = this.computeUnrealizedPnL(currentClose, ctx);
+    if (pnl <= -stopLossPct) return TradingAction.SELL;
+    return action;
+  }
+
+  /**
+   * Long-only reward, in units of next-candle return:
+   *   in position + HOLD/BUY  → priceReturn - feeDrag (continue holding)
+   *   in position + SELL      → realized PnL on exit (closes the trade)
+   *   flat + BUY              → priceReturn - feeEntry (entry reward)
+   *   flat + SELL/HOLD        → small idle penalty (invalid SELL or no signal)
+   */
   private computeReward(
     series: CandleSeries, i: number,
-    action: TradingAction, position: number
+    action: TradingAction, ctx: PositionContext
   ): number {
     const currentClose = series.at(i).closePrice().toNumber();
     const nextClose = series.at(i + 1).closePrice().toNumber();
     const priceReturn = (nextClose - currentClose) / currentClose;
-    if (position === 1) return priceReturn - 0.001;
-    if (position === -1) return -priceReturn - 0.001;
-    if (action.isBuy() || action.isSell()) return priceReturn * 0.5;
+    if (ctx.position === 1) {
+      if (action.isSell()) {
+        const realized = this.computeUnrealizedPnL(currentClose, ctx);
+        return realized - 2 * FEE_RATE;
+      }
+      return priceReturn;
+    }
+    if (action.isBuy()) return priceReturn - FEE_RATE;
     return -0.0001;
   }
 
   private updateContext(ctx: PositionContext, action: TradingAction, currentClose: number): void {
     const newPosition = this.nextPosition(action, ctx.position);
-    if (newPosition !== ctx.position) {
-      ctx.entryPrice = newPosition === 0 ? 0 : currentClose;
-      ctx.barsInPosition = 0;
-    } else if (ctx.position !== 0) {
-      ctx.barsInPosition++;
+    if (newPosition === ctx.position) {
+      if (ctx.position === 1) ctx.barsInPosition++;
+      return;
     }
     ctx.position = newPosition;
+    if (newPosition === 1) {
+      ctx.entryPrice = currentClose;
+      ctx.barsInPosition = 0;
+    } else {
+      ctx.entryPrice = 0;
+      ctx.barsInPosition = 0;
+    }
   }
 
+  /**
+   * Long-only state machine:
+   *   flat (0) + BUY  → long (1)
+   *   long (1) + SELL → flat (0)
+   *   all other transitions: no change.
+   */
   private nextPosition(action: TradingAction, currentPosition: number): number {
-    if (action.isBuy()) return 1;
-    if (action.isSell()) return -1;
+    if (currentPosition === 0 && action.isBuy()) return 1;
+    if (currentPosition === 1 && action.isSell()) return 0;
     return currentPosition;
   }
 
@@ -346,6 +387,7 @@ export interface TrainInput {
   rlEpisodes: number;
   forecastModelPath: string;
   agentPath: string;
+  stopLossPct: number;
 }
 
 interface TrainingSet {

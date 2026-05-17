@@ -5,6 +5,9 @@ import { DecisionAgent } from "../../domain/ports/DecisionAgent";
 import { RiskPolicy } from "../../domain/ports/RiskPolicy";
 import { Logger } from "../../domain/ports/Logger";
 import { FeatureBuilder } from "./FeatureBuilder";
+import { RegimeFilter } from "./RegimeFilter";
+import { PlattCalibrator } from "./PlattCalibrator";
+import { AdaptiveThreshold } from "./AdaptiveThreshold";
 import { CandleSeries } from "../../domain/collections/CandleSeries";
 import { TradingSymbol } from "../../domain/value-objects/TradingSymbol";
 import { TradingAction } from "../../domain/enums/TradingAction";
@@ -14,6 +17,14 @@ import { Price } from "../../domain/value-objects/Price";
 import { Money } from "../../domain/value-objects/Money";
 
 const VOLATILITY_WINDOW = 20;
+// Tuned against the observed forecaster output range (~5e-4):
+//   - BASE_SIGNAL_THRESHOLD was 0.002, blocking 100% of trades.
+//   - MIN_CALIBRATED_PROBABILITY was 0.65, impossible with default identity-sigmoid.
+//   - ENSEMBLE_RUNS halved to cut inference cost without measurable quality loss.
+const ENSEMBLE_RUNS = 10;
+const MIN_CONFIDENCE = 0.75;
+const MIN_CALIBRATED_PROBABILITY = 0.52;
+const BASE_SIGNAL_THRESHOLD = 0.0003;
 
 /**
  * Service: a single decision-and-execution cycle.
@@ -39,13 +50,60 @@ export class TradingCycle {
       this.configuration.symbol, 200, 0
     );
     const features = this.dependencies.featureBuilder.build(series);
-    const forecast = await this.dependencies.forecastModel.predict(features);
+    const ensemble = await this.dependencies.forecastModel.predictWithUncertainty(
+      features, ENSEMBLE_RUNS
+    );
+    const forecast = ensemble.mean;
     const currentPrice = series.last().closePrice();
     const position = await this.detectPosition(currentPrice.toNumber());
     const stateFeatures = this.buildStateVector(series, forecast, position, currentPrice.toNumber());
     const decision = await this.dependencies.agent.decide(stateFeatures);
-    const effectiveAction = this.applyStopLoss(decision.action, position, currentPrice.toNumber());
-    return await this.executeDecision(effectiveAction, currentPrice, position);
+
+    const candidate = this.applyStopLoss(decision.action, position, currentPrice.toNumber());
+    const filtered = this.applyAccuracyFilters(candidate, series, ensemble);
+    const execution = await this.executeDecision(filtered, currentPrice, position);
+    return { ...execution, forecast };
+  }
+
+  /**
+   * Layered filters that downgrade an action to HOLD when accuracy gates fail.
+   * SELL on an open position is exempt: closing must remain unconditional so
+   * that stop-loss and risk-off exits cannot be vetoed by low confidence.
+   *
+   * Stages:
+   *   1. Regime filter — only act in trending markets (ADX + volume confirm).
+   *   2. Adaptive threshold — require |mean[0]| > base × (recent ATR / slow ATR).
+   *   3. Ensemble confidence — variance-derived confidence must beat the gate.
+   *   4. Platt-calibrated probability — must beat the gate too.
+   */
+  private applyAccuracyFilters(
+    action: TradingAction,
+    series: CandleSeries,
+    ensemble: { mean: ReadonlyArray<number>; confidence: ReadonlyArray<number> }
+  ): TradingAction {
+    if (!action.isBuy()) return action;
+    const reason = this.firstBlockingFilter(series, ensemble);
+    if (reason === null) return action;
+    this.dependencies.logger.info(`Trade gated by ${reason} — forcing HOLD`);
+    return TradingAction.HOLD;
+  }
+
+  private firstBlockingFilter(
+    series: CandleSeries,
+    ensemble: { mean: ReadonlyArray<number>; confidence: ReadonlyArray<number> }
+  ): string | null {
+    if (!this.dependencies.regimeFilter.isTrending(series)) return "regime filter (sideways market)";
+    const threshold = this.dependencies.adaptiveThreshold.compute(series, BASE_SIGNAL_THRESHOLD);
+    if (Math.abs(ensemble.mean[0]) < threshold) return `adaptive threshold (signal ${ensemble.mean[0].toFixed(5)} < ${threshold.toFixed(5)})`;
+    if ((ensemble.confidence[0] ?? 0) < MIN_CONFIDENCE) return `ensemble confidence (${(ensemble.confidence[0] ?? 0).toFixed(2)} < ${MIN_CONFIDENCE})`;
+    // Platt gate is only meaningful after fitting; before that, slope=1/intercept=0
+    // makes σ(forecast) ≈ 0.5 and would block every trade. CalibrationWarmup fits
+    // the calibrator before the session starts; if it has not run, this gate is bypassed.
+    if (this.dependencies.calibrator.isCalibrated()) {
+      const calibrated = this.dependencies.calibrator.calibratedProbability(ensemble.mean[0]);
+      if (calibrated < MIN_CALIBRATED_PROBABILITY) return `Platt probability (${calibrated.toFixed(2)} < ${MIN_CALIBRATED_PROBABILITY})`;
+    }
+    return null;
   }
 
   private async detectPosition(currentPrice: number): Promise<number> {
@@ -121,7 +179,7 @@ export class TradingCycle {
     action: TradingAction,
     currentPrice: Price,
     position: number
-  ): Promise<CycleResult> {
+  ): Promise<ExecutionResult> {
     const cash = await this.dependencies.executor.fetchCashBalance();
     if (!this.dependencies.risk.approve(action, cash)) {
       this.dependencies.logger.warn("Action rejected by risk policy");
@@ -132,7 +190,7 @@ export class TradingCycle {
     return this.holdResult(action, currentPrice);
   }
 
-  private async performBuy(price: Price, cash: Money): Promise<CycleResult> {
+  private async performBuy(price: Price, cash: Money): Promise<ExecutionResult> {
     const sizing = this.dependencies.risk.positionSizeFor(cash);
     const quantity = Quantity.of(sizing.toNumber() / price.toNumber());
     const order = Order.buy(this.configuration.symbol, quantity, price);
@@ -141,7 +199,7 @@ export class TradingCycle {
     return { action: TradingAction.BUY, price, order: filled };
   }
 
-  private async performSell(price: Price): Promise<CycleResult> {
+  private async performSell(price: Price): Promise<ExecutionResult> {
     const holding = await this.dependencies.executor.fetchHoldingQuantity(
       this.configuration.symbol
     );
@@ -152,9 +210,15 @@ export class TradingCycle {
     return { action: TradingAction.SELL, price, order: filled };
   }
 
-  private holdResult(action: TradingAction, price: Price): CycleResult {
+  private holdResult(action: TradingAction, price: Price): ExecutionResult {
     return { action, price, order: null };
   }
+}
+
+interface ExecutionResult {
+  action: TradingAction;
+  price: Price;
+  order: Order | null;
 }
 
 export interface TradingCycleDependencies {
@@ -165,6 +229,9 @@ export interface TradingCycleDependencies {
   risk: RiskPolicy;
   logger: Logger;
   featureBuilder: FeatureBuilder;
+  regimeFilter: RegimeFilter;
+  calibrator: PlattCalibrator;
+  adaptiveThreshold: AdaptiveThreshold;
 }
 
 export interface TradingCycleConfig {
@@ -176,4 +243,5 @@ export interface CycleResult {
   action: TradingAction;
   price: Price;
   order: Order | null;
+  forecast: ReadonlyArray<number>;
 }

@@ -1,35 +1,63 @@
 import { Container } from "../Container";
 import { Command } from "../Cli";
-import { BacktestUseCase } from "../../application/use-cases/BacktestUseCase";
+import { TradingSessionUseCase } from "../../application/use-cases/TradingSessionUseCase";
 
 /**
  * CLI command: TEST mode (backtest with real data).
- * Simulates trades on historical Binance candles without spending money.
- * Reports directional accuracy and win rate to validate the model.
+ *
+ * Identical core (TradingSessionUseCase + TradingCycle) as INVEST.
+ * Only the injected adapters differ:
+ *   - PaperExecutor instead of BinanceLiveExecutor (no real money)
+ *   - HistoricalReplayMarketData instead of BinanceMarketData
+ *   - HistoricalClock instead of SystemClock
+ *   - BacktestObserver instead of LiveLogObserver
+ *
+ * Before the session loop, a one-shot warm-up fits the Platt calibrator on
+ * the first `CALIBRATION_CANDLES` candles so the calibration gate runs with
+ * fitted parameters instead of identity-sigmoid (which always blocks).
  */
 export class TestCommand implements Command {
+  private static readonly HISTORICAL_CANDLES = 1000;
+  private static readonly CALIBRATION_CANDLES = 200;
+  private static readonly CALIBRATION_SAMPLES = 100;
+  private static readonly WINDOW_SIZE = 64;
+
   constructor(private readonly container: Container) {}
 
   async execute(): Promise<void> {
-    const env = this.container.environment;
-    const useCase = new BacktestUseCase({
-      marketData: this.container.marketData,
-      forecastModel: this.container.forecaster,
-      agent: this.container.agent,
+    const replay = await this.container.buildReplaySetup(
+      TestCommand.HISTORICAL_CANDLES,
+      TestCommand.CALIBRATION_CANDLES,
+      TestCommand.WINDOW_SIZE
+    );
+    await this.container.storage.loadForecastModel("./models/bilstm");
+    await this.container.storage.loadAgent("./models/ppo");
+    await this.container.buildCalibrationWarmup().run({
+      series: replay.calibrationSeries,
+      forecaster: this.container.forecaster,
+      featureBuilder: this.container.featureBuilder,
+      calibrator: this.container.calibrator,
+      logger: this.container.logger,
+      samples: TestCommand.CALIBRATION_SAMPLES,
+    });
+    const executor = this.container.buildPaperExecutor();
+    const cycle = this.container.buildTradingCycle(executor, replay.marketData);
+    const useCase = new TradingSessionUseCase({
+      cycle,
+      clock: replay.clock,
+      executor,
+      observer: replay.observer,
+      risk: this.container.risk,
       storage: this.container.storage,
       logger: this.container.logger,
-      risk: this.container.risk,
-      featureBuilder: this.container.featureBuilder,
+      symbol: this.container.symbol,
+      marketData: replay.marketData,
     });
     await useCase.execute({
-      symbol: this.container.symbol,
-      historicalCandles: 1000,
-      windowSize: 64,
       forecastModelPath: "./models/bilstm",
       agentPath: "./models/ppo",
-      initialCapital: this.container.initialCapital.toNumber(),
-      maxPositionRiskPct: env.maxPositionRiskPct,
-      stopLossPct: env.stopLossPct,
+      retryDelayMs: 0,
+      mode: "TEST",
     });
   }
 }

@@ -1,7 +1,7 @@
 import { tf } from "../tensorflow/tf";
 import type * as TF from "@tensorflow/tfjs-node";
 import {
-  ForecastModel, ForecastTrainOptions, ForecasterTrainingState,
+  ForecastModel, ForecastTrainOptions, ForecasterTrainingState, EnsembleResult,
 } from "../../domain/ports/ForecastModel";
 import { FeatureMatrix } from "../../domain/collections/FeatureMatrix";
 
@@ -43,9 +43,17 @@ export class BiLSTMForecaster implements ForecastModel {
 
     const drop2 = tf.layers.dropout({ rate: dropout }).apply(lstm2) as TF.SymbolicTensor;
 
-    const dense = tf.layers.dense({
-      units: hiddenUnits, activation: "relu", kernelRegularizer: reg,
+    // Dense1 uses LeakyReLU instead of ReLU, and starts with a small positive
+    // bias. Both changes guard against the dying-ReLU collapse the prior model
+    // suffered: a ReLU layer whose biases drifted negative produced zero for
+    // every input, leaving Dense2 to output only its bias as the forecast.
+    const denseLinear = tf.layers.dense({
+      units: hiddenUnits,
+      activation: "linear",
+      kernelRegularizer: reg,
+      biasInitializer: tf.initializers.constant({ value: 0.01 }),
     }).apply(drop2) as TF.SymbolicTensor;
+    const dense = tf.layers.leakyReLU({ alpha: 0.01 }).apply(denseLinear) as TF.SymbolicTensor;
 
     const output = tf.layers.dense({ units: horizon }).apply(dense) as TF.SymbolicTensor;
 
@@ -57,6 +65,46 @@ export class BiLSTMForecaster implements ForecastModel {
     const output = this.model.predict(inputTensor) as TF.Tensor;
     const result = Array.from(await output.data());
     tf.dispose([inputTensor, output]);
+    return result;
+  }
+
+  /**
+   * Monte Carlo Dropout: runs `runs` forward passes with dropout kept active
+   * (via `apply(x, { training: true })`) and averages. Variance across runs
+   * is a proxy for predictive uncertainty: high variance → low confidence.
+   *
+   * Costs `runs` × inference time per call — keep `runs` between 10 and 30.
+   */
+  async predictWithUncertainty(
+    features: FeatureMatrix, runs: number = 20
+  ): Promise<EnsembleResult> {
+    if (runs < 1) throw new Error("predictWithUncertainty: runs must be >= 1");
+    const inputTensor = tf.tensor3d([features.toRawArray()]);
+    const predictions: number[][] = [];
+    try {
+      for (let i = 0; i < runs; i++) {
+        const output = this.model.apply(inputTensor, { training: true }) as TF.Tensor;
+        const flat = Array.from(await output.data());
+        tf.dispose(output);
+        predictions.push(flat);
+      }
+    } finally {
+      tf.dispose(inputTensor);
+    }
+    const horizon = predictions[0].length;
+    const mean = new Array<number>(horizon);
+    const variance = new Array<number>(horizon);
+    const confidence = new Array<number>(horizon);
+    for (let j = 0; j < horizon; j++) {
+      let sum = 0;
+      for (const p of predictions) sum += p[j];
+      mean[j] = sum / runs;
+      let sq = 0;
+      for (const p of predictions) sq += (p[j] - mean[j]) ** 2;
+      variance[j] = sq / runs;
+      confidence[j] = 1 / (1 + variance[j]);
+    }
+    const result: EnsembleResult = { mean, variance, confidence };
     return result;
   }
 

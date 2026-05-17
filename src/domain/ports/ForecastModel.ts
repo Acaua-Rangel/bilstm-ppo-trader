@@ -12,12 +12,24 @@ export interface ForecastModel {
    * Returns one forecast (length `horizon`) per input.
    */
   predictBatch(features: FeatureMatrix[]): Promise<number[][]>;
+  /**
+   * Monte Carlo Dropout ensemble: runs `runs` forward passes with dropout
+   * active and reports mean, variance and a 1/(1+variance) confidence.
+   * Used at inference to gate low-confidence trades without retraining.
+   */
+  predictWithUncertainty(features: FeatureMatrix, runs?: number): Promise<EnsembleResult>;
   train(
     inputs: FeatureMatrix[],
     targets: number[][],
     epochs: number,
     options?: ForecastTrainOptions
   ): Promise<ForecasterTrainingState>;
+}
+
+export interface EnsembleResult {
+  mean: ReadonlyArray<number>;
+  variance: ReadonlyArray<number>;
+  confidence: ReadonlyArray<number>;
 }
 
 export interface ForecastTrainOptions {

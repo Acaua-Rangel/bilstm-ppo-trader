@@ -1,5 +1,6 @@
 import { ConsoleLogger } from "../infrastructure/logging/ConsoleLogger";
 import { BinanceMarketData } from "../infrastructure/market-data/BinanceMarketData";
+import { HistoricalReplayMarketData } from "../infrastructure/market-data/HistoricalReplayMarketData";
 import { BiLSTMForecaster } from "../infrastructure/models/BiLSTMForecaster";
 import { PPODecisionAgent } from "../infrastructure/models/PPODecisionAgent";
 import { ConservativeRiskPolicy } from "../infrastructure/risk/ConservativeRiskPolicy";
@@ -7,26 +8,46 @@ import { PaperExecutor } from "../infrastructure/execution/PaperExecutor";
 import { BinanceLiveExecutor } from "../infrastructure/execution/BinanceLiveExecutor";
 import { FileModelStorage } from "../infrastructure/storage/FileModelStorage";
 import { CheckpointManager } from "../infrastructure/storage/CheckpointManager";
+import { SystemClock } from "../infrastructure/clock/SystemClock";
+import { HistoricalClock } from "../infrastructure/clock/HistoricalClock";
+import { PlaybackCursor } from "../infrastructure/clock/PlaybackCursor";
+import { LiveLogObserver } from "../infrastructure/observers/LiveLogObserver";
+import { BacktestObserver } from "../infrastructure/observers/BacktestObserver";
 import { FeatureBuilder } from "../application/services/FeatureBuilder";
 import { TradingCycle } from "../application/services/TradingCycle";
+import { RegimeFilter } from "../application/services/RegimeFilter";
+import { PlattCalibrator } from "../application/services/PlattCalibrator";
+import { AdaptiveThreshold } from "../application/services/AdaptiveThreshold";
+import { CalibrationWarmup } from "../application/services/CalibrationWarmup";
+import { CandleSeries } from "../domain/collections/CandleSeries";
 import { TradingSymbol } from "../domain/value-objects/TradingSymbol";
 import { Money } from "../domain/value-objects/Money";
 import { Logger } from "../domain/ports/Logger";
 import { TradeExecutor } from "../domain/ports/TradeExecutor";
+import { MarketDataProvider } from "../domain/ports/MarketDataProvider";
+import { Clock } from "../domain/ports/Clock";
+import { SessionObserver } from "../domain/ports/SessionObserver";
 
 /**
  * Composition Root: configures all dependencies.
- * Single place where concrete infrastructure is instantiated.
- * Dependency Inversion: everything here is injected into upper layers.
+ *
+ * Hexagonal architecture: the application core never depends on the
+ * concrete adapters chosen here. TEST and INVEST share the same core
+ * (TradingSessionUseCase + TradingCycle) and differ only in which
+ * adapters this container hands them.
  */
 export class Container {
   readonly logger: Logger;
+  /** Live market data adapter — also serves as the historical fetcher for TEST setup. */
   readonly marketData: BinanceMarketData;
   readonly forecaster: BiLSTMForecaster;
   readonly agent: PPODecisionAgent;
   readonly risk: ConservativeRiskPolicy;
   readonly storage: FileModelStorage;
   readonly featureBuilder: FeatureBuilder;
+  readonly regimeFilter: RegimeFilter;
+  readonly calibrator: PlattCalibrator;
+  readonly adaptiveThreshold: AdaptiveThreshold;
   readonly symbol: TradingSymbol;
   readonly initialCapital: Money;
 
@@ -43,11 +64,12 @@ export class Container {
     this.agent = new PPODecisionAgent(this.ppoConfig());
     this.risk = new ConservativeRiskPolicy(this.riskConfig());
     this.storage = new FileModelStorage(this.forecaster, this.agent);
+    this.regimeFilter = new RegimeFilter();
+    this.calibrator = new PlattCalibrator();
+    this.adaptiveThreshold = new AdaptiveThreshold();
   }
 
-  buildPaperExecutor(): TradeExecutor {
-    return new PaperExecutor(this.initialCapital, this.logger);
-  }
+  // --- Live (INVEST) wiring ----------------------------------------------
 
   buildLiveExecutor(): TradeExecutor {
     return new BinanceLiveExecutor({
@@ -57,16 +79,72 @@ export class Container {
     }, this.logger);
   }
 
+  buildLiveClock(intervalMs: number): Clock {
+    return new SystemClock(intervalMs);
+  }
+
+  buildLiveObserver(): SessionObserver {
+    return new LiveLogObserver(this.logger);
+  }
+
+  marketDataProvider(): MarketDataProvider {
+    return this.marketData;
+  }
+
+  // --- Replay (TEST) wiring ----------------------------------------------
+
+  buildPaperExecutor(): TradeExecutor {
+    return new PaperExecutor(this.initialCapital, this.logger);
+  }
+
+  async buildReplaySetup(
+    historicalCandles: number,
+    calibrationCandles: number,
+    windowSize: number
+  ): Promise<ReplaySetup> {
+    const fullSeries = await this.marketData.fetchRecentCandles(
+      this.symbol, historicalCandles, 0
+    );
+    // The first `calibrationCandles` form the warm-up set. The backtest cursor
+    // starts where the calibration window ends, so the data the calibrator was
+    // fit on never overlaps with the data being traded.
+    const startIndex = Math.max(
+      Math.min(windowSize, fullSeries.size() - 1),
+      Math.min(calibrationCandles, fullSeries.size() - 1)
+    );
+    const cursor = new PlaybackCursor(startIndex, fullSeries.size() - 1);
+    const marketData = new HistoricalReplayMarketData(fullSeries, cursor);
+    const clock = new HistoricalClock(cursor);
+    const observer = new BacktestObserver(this.logger, fullSeries, cursor);
+    const calibrationSeries = fullSeries.rangeFromIndex(0, startIndex);
+    return { marketData, clock, observer, cursor, calibrationSeries };
+  }
+
+  // --- Calibration warm-up ------------------------------------------------
+
+  buildCalibrationWarmup(): CalibrationWarmup {
+    return new CalibrationWarmup();
+  }
+
+  async fetchCalibrationSeries(candles: number): Promise<CandleSeries> {
+    return await this.marketData.fetchRecentCandles(this.symbol, candles, 0);
+  }
+
+  // --- Shared --------------------------------------------------------------
+
   buildCheckpointManager(directory: string): CheckpointManager {
     return new CheckpointManager(directory, this.storage);
   }
 
-  buildTradingCycle(executor: TradeExecutor): TradingCycle {
+  buildTradingCycle(executor: TradeExecutor, marketData: MarketDataProvider): TradingCycle {
     return new TradingCycle({
-      marketData: this.marketData,
+      marketData,
       executor, forecastModel: this.forecaster,
       agent: this.agent, risk: this.risk,
       logger: this.logger, featureBuilder: this.featureBuilder,
+      regimeFilter: this.regimeFilter,
+      calibrator: this.calibrator,
+      adaptiveThreshold: this.adaptiveThreshold,
     }, { symbol: this.symbol, stopLossPct: this.env.stopLossPct });
   }
 
@@ -94,6 +172,15 @@ export class Container {
       maxDrawdownPct: this.env.maxDailyDrawdownPct,
     };
   }
+}
+
+export interface ReplaySetup {
+  marketData: HistoricalReplayMarketData;
+  clock: Clock;
+  observer: SessionObserver;
+  cursor: PlaybackCursor;
+  /** Candles that precede the backtest range — used to fit the calibrator. */
+  calibrationSeries: CandleSeries;
 }
 
 export interface Environment {

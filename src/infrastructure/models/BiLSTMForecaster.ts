@@ -4,6 +4,7 @@ import {
   ForecastModel, ForecastTrainOptions, ForecasterTrainingState, EnsembleResult,
 } from "../../domain/ports/ForecastModel";
 import { FeatureMatrix } from "../../domain/collections/FeatureMatrix";
+import { SelfAttentionLayer } from "./SelfAttentionLayer";
 
 /**
  * Adapter: BiLSTM (Bidirectional LSTM) on top of TensorFlow.js.
@@ -20,6 +21,22 @@ export class BiLSTMForecaster implements ForecastModel {
     this.model = this.buildModel();
   }
 
+  /**
+   * Architecture:
+   *   Input [B, T, F]
+   *   → BiLSTM (returnSequences=true)        [B, T, 2H]
+   *   → Dropout
+   *   → BiLSTM (returnSequences=true)        [B, T, H]
+   *   → Dropout
+   *   → SelfAttention (dModel = H)           [B, T, H]   — re-weights timesteps
+   *   → GlobalAveragePooling1D               [B, H]
+   *   → Dense + LeakyReLU                    [B, H]
+   *   → Dense (horizon)                      [B, horizon]
+   *
+   * The second BiLSTM now returns sequences so the attention layer has a
+   * temporal axis to operate on. Pooling at the end replaces the implicit
+   * "last hidden state" pooling the previous architecture relied on.
+   */
   private buildModel(): TF.LayersModel {
     const { seqLen, numFeatures, hiddenUnits, dropout, horizon, l2 } = this.config;
     const reg = tf.regularizers.l2({ l2 });
@@ -37,11 +54,18 @@ export class BiLSTMForecaster implements ForecastModel {
     const lstm2 = tf.layers.bidirectional({
       layer: tf.layers.lstm({
         units: Math.floor(hiddenUnits / 2),
+        returnSequences: true,
         kernelRegularizer: reg, recurrentRegularizer: reg,
       }) as TF.RNN,
     }).apply(drop1) as TF.SymbolicTensor;
 
     const drop2 = tf.layers.dropout({ rate: dropout }).apply(lstm2) as TF.SymbolicTensor;
+
+    const attended = new SelfAttentionLayer({ dModel: hiddenUnits })
+      .apply(drop2) as TF.SymbolicTensor;
+
+    const pooled = tf.layers.globalAveragePooling1d({})
+      .apply(attended) as TF.SymbolicTensor;
 
     // Dense1 uses LeakyReLU instead of ReLU, and starts with a small positive
     // bias. Both changes guard against the dying-ReLU collapse the prior model
@@ -52,7 +76,7 @@ export class BiLSTMForecaster implements ForecastModel {
       activation: "linear",
       kernelRegularizer: reg,
       biasInitializer: tf.initializers.constant({ value: 0.01 }),
-    }).apply(drop2) as TF.SymbolicTensor;
+    }).apply(pooled) as TF.SymbolicTensor;
     const dense = tf.layers.leakyReLU({ alpha: 0.01 }).apply(denseLinear) as TF.SymbolicTensor;
 
     const output = tf.layers.dense({ units: horizon }).apply(dense) as TF.SymbolicTensor;

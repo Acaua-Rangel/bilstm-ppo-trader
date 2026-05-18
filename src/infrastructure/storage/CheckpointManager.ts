@@ -3,7 +3,7 @@ import * as path from "path";
 import { ModelStorage } from "../../domain/ports/ModelStorage";
 import { ForecasterTrainingState } from "../../domain/ports/ForecastModel";
 
-const METADATA_VERSION = 1;
+const METADATA_VERSION = 2;
 const METADATA_FILE = "metadata.json";
 const FORECASTER_DIR = "forecaster";
 const AGENT_DIR = "agent";
@@ -106,7 +106,8 @@ export interface AgentCheckpointState {
 }
 
 export interface TrainInputSnapshot {
-  symbol: string;
+  agentSymbol: string;
+  forecasterSymbols: string[];
   historicalCandles: number;
   windowSize: number;
   horizon: number;

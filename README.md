@@ -1,6 +1,8 @@
 # AI Trading Bot
 
-Trading bot with **BiLSTM** (forecast) + **PPO** (decision), built in TypeScript.
+Trading bot with **BiLSTM + Self-Attention** (forecast) + **PPO** (decision), built in TypeScript.
+
+Forecaster is pre-trained from scratch on a 4-asset multi-symbol dataset (BTC + ETH + SOL + BNB) for ~200k labeled samples; the PPO agent specializes on the primary symbol (BTC by default).
 
 ## Architecture
 
@@ -62,7 +64,20 @@ src/
 npm run train
 ```
 
-Downloads 5000 historical candles from Binance, trains the **BiLSTM** forecaster with supervised regression (predicting the next 4 returns), then trains the **PPO** agent for 30 episodes. **Never touches a real executor** — `TrainCommand` does not instantiate one.
+Downloads 50000 historical candles per symbol from Binance for each of the 4 forecaster symbols (BTC, ETH, SOL, BNB), trains the **BiLSTM + Self-Attention** forecaster with supervised regression (predicting the next 4 returns) on the combined dataset (~200k samples), then trains the **PPO** agent for 50 episodes on the primary symbol only. **Never touches a real executor** — `TrainCommand` does not instantiate one.
+
+Forecaster architecture:
+```
+Input [B, 64, 10]
+ → BiLSTM (return_sequences=True)        [B, 64, 128]
+ → Dropout
+ → BiLSTM (return_sequences=True)        [B, 64, 64]
+ → Dropout
+ → Self-Attention (dModel=64)            [B, 64, 64]
+ → GlobalAveragePooling1D                [B, 64]
+ → Dense + LeakyReLU                     [B, 64]
+ → Dense (horizon=4)                     [B, 4]
+```
 
 Training optimizations included:
 - L2 regularization on all LSTM kernels

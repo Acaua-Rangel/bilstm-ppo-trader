@@ -35,31 +35,40 @@ const VALIDATION_FRACTION = 0.1;
 const EMBARGO_FRACTION = 0.01;
 
 /**
- * Use Case: trains the forecast model (BiLSTM) and decision agent (PPO).
+ * Use Case: trains the forecast model (BiLSTM+Attention) and decision agent (PPO).
  * TRAIN mode: never touches a real executor.
  *
- * Short-term, long-only trading: the agent can only enter long (BUY) and
- * exit long (SELL). No short selling. Stop loss is enforced during training
- * to mirror the backtest and live trading environment.
+ * Multi-symbol forecaster training:
+ *   The forecaster is fed candles from every symbol in `forecasterSymbols`.
+ *   Each symbol's series is split independently (purge + embargo) so a
+ *   future BTC candle cannot leak into the BTC train set via the ETH val
+ *   set, etc. Train and validation sets are then concatenated.
  *
- * Performance: features and forecasts are precomputed once and reused across
- * all PPO episodes (the forecaster is frozen during PPO). This eliminates
- * hundreds of thousands of batch=1 GPU calls, letting the GPU actually saturate.
+ * Single-symbol agent training:
+ *   PPO trains exclusively on `agentSymbol` because action semantics,
+ *   reward magnitudes, and the live executor's holding all assume one
+ *   market. Multi-asset RL is a separate research project.
+ *
+ * Short-term, long-only trading: BUY (open long), SELL (close long), no
+ * shorts. Stop-loss and take-profit are enforced during training to mirror
+ * the backtest and live trading environment.
  */
 export class TrainModelsUseCase {
-  private cachedFeatures: FeatureMatrix[] | null = null;
-  private cachedTargets: number[][] | null = null;
-  private cachedForecasts: number[][] | null = null;
-  private cachedVolatility: number[] | null = null;
+  private cachedAgentFeatures: FeatureMatrix[] | null = null;
+  private cachedAgentForecasts: number[][] | null = null;
+  private cachedAgentVolatility: number[] | null = null;
+  private cachedForecasterSplit: ForecasterSplit | null = null;
 
   constructor(private readonly deps: TrainDependencies) {}
 
   async execute(input: TrainInput): Promise<void> {
     this.deps.logger.info("=== TRAINING MODE started ===");
+    this.assertSymbolsValid(input);
     const resumed = await this.tryLoadCheckpoint(input);
-    const series = await this.fetchHistory(input);
+    const agentSeries = await this.fetchAgentHistory(input);
 
-    this.precomputeFeaturesAndVolatility(series, input);
+    await this.precomputeForecasterDataset(input);
+    this.precomputeAgentFeaturesAndVolatility(agentSeries, input);
 
     const forecasterState: ForecasterTrainingState = resumed?.forecaster ?? {
       completedEpochs: 0, bestValLoss: Infinity, patienceCount: 0,
@@ -73,15 +82,28 @@ export class TrainModelsUseCase {
       input, forecasterState, agentState, createdAt
     );
 
-    await this.precomputeForecasts();
+    await this.precomputeAgentForecasts();
 
     const finalAgent = await this.maybeTrainAgent(
-      series, input, finalForecaster, agentState, createdAt
+      agentSeries, input, finalForecaster, agentState, createdAt
     );
 
     await this.persistArtifacts(input);
     await this.saveCheckpoint("done", input, finalForecaster, finalAgent, createdAt);
     this.deps.logger.info("Training complete");
+  }
+
+  private assertSymbolsValid(input: TrainInput): void {
+    if (input.forecasterSymbols.length === 0) {
+      throw new Error("TrainInput.forecasterSymbols must contain at least one symbol");
+    }
+    const agentInList = input.forecasterSymbols
+      .some(s => s.toString() === input.agentSymbol.toString());
+    if (!agentInList) {
+      throw new Error(
+        `agentSymbol ${input.agentSymbol.toString()} must also appear in forecasterSymbols`
+      );
+    }
   }
 
   private async tryLoadCheckpoint(input: TrainInput): Promise<CheckpointData | null> {
@@ -105,8 +127,13 @@ export class TrainModelsUseCase {
 
   private warnIfInputChanged(current: TrainInput, saved: TrainInputSnapshot): void {
     const log = this.deps.logger;
-    if (current.symbol.toString() !== saved.symbol) {
-      log.warn(`symbol changed: ${saved.symbol} → ${current.symbol.toString()}`);
+    if (current.agentSymbol.toString() !== saved.agentSymbol) {
+      log.warn(`agentSymbol changed: ${saved.agentSymbol} → ${current.agentSymbol.toString()}`);
+    }
+    const currentSymbols = current.forecasterSymbols.map(s => s.toString()).sort().join(",");
+    const savedSymbols = [...saved.forecasterSymbols].sort().join(",");
+    if (currentSymbols !== savedSymbols) {
+      log.warn(`forecasterSymbols changed: [${savedSymbols}] → [${currentSymbols}]`);
     }
     if (current.historicalCandles !== saved.historicalCandles) {
       log.warn(`historicalCandles changed: ${saved.historicalCandles} → ${current.historicalCandles}`);
@@ -125,24 +152,84 @@ export class TrainModelsUseCase {
     }
   }
 
-  private async fetchHistory(input: TrainInput): Promise<CandleSeries> {
+  private async fetchAgentHistory(input: TrainInput): Promise<CandleSeries> {
     const total = input.historicalCandles + BACKTEST_HOLDOUT_CANDLES;
     this.deps.logger.info(
-      `Downloading ${total} candles (${input.historicalCandles} train + ${BACKTEST_HOLDOUT_CANDLES} holdout)`
+      `[agent ${input.agentSymbol.toString()}] downloading ${total} candles (${input.historicalCandles} train + ${BACKTEST_HOLDOUT_CANDLES} holdout)`
     );
-    const full = await this.deps.marketData.fetchRecentCandles(input.symbol, total, 0);
+    const full = await this.deps.marketData.fetchRecentCandles(input.agentSymbol, total, 0);
+    return full.rangeFromIndex(0, full.size() - BACKTEST_HOLDOUT_CANDLES);
+  }
+
+  private async fetchForecasterHistory(
+    symbol: TradingSymbol, input: TrainInput
+  ): Promise<CandleSeries> {
+    const total = input.historicalCandles + BACKTEST_HOLDOUT_CANDLES;
+    this.deps.logger.info(
+      `[forecaster ${symbol.toString()}] downloading ${total} candles`
+    );
+    const full = await this.deps.marketData.fetchRecentCandles(symbol, total, 0);
+    // The same holdout slice removed for the agent must also be removed
+    // from every forecaster symbol, otherwise the model could see, during
+    // training, the very candles that will appear in TEST mode.
     return full.rangeFromIndex(0, full.size() - BACKTEST_HOLDOUT_CANDLES);
   }
 
   /**
-   * One-time CPU work: compute feature matrices, future returns, and volatility
-   * for every step. These don't depend on model state and are reused across
-   * forecaster training, PPO precompute, and every PPO episode.
+   * Builds features + targets for every forecaster symbol, applies a
+   * per-symbol purged/embargoed split, then concatenates train and
+   * validation sets across symbols. Per-symbol splitting prevents
+   * cross-symbol leakage: a late BTC candle never trains a model whose
+   * BTC validation set contains adjacent samples.
    */
-  private precomputeFeaturesAndVolatility(series: CandleSeries, input: TrainInput): void {
-    if (this.cachedFeatures && this.cachedTargets && this.cachedVolatility) return;
-    this.deps.logger.info("Precomputing features, targets, and volatility...");
+  private async precomputeForecasterDataset(input: TrainInput): Promise<void> {
+    if (this.cachedForecasterSplit) return;
+    const splitter = new PurgedEmbargoedSplit(input.horizon, EMBARGO_FRACTION);
+    const trainInputs: FeatureMatrix[] = [];
+    const trainTargets: number[][] = [];
+    const valInputs: FeatureMatrix[] = [];
+    const valTargets: number[][] = [];
+    let totalPurged = 0;
+
+    for (const symbol of input.forecasterSymbols) {
+      const series = await this.fetchForecasterHistory(symbol, input);
+      const { features, targets } = this.buildSamples(series, input);
+      const inputSplit = splitter.split(features, VALIDATION_FRACTION);
+      const targetSplit = splitter.split(targets, VALIDATION_FRACTION);
+      trainInputs.push(...inputSplit.train);
+      trainTargets.push(...targetSplit.train);
+      valInputs.push(...inputSplit.validation);
+      valTargets.push(...targetSplit.validation);
+      totalPurged += inputSplit.purgedCount;
+      this.deps.logger.info(
+        `[forecaster ${symbol.toString()}] train=${inputSplit.train.length}, val=${inputSplit.validation.length}, purged=${inputSplit.purgedCount}`
+      );
+    }
+
+    this.cachedForecasterSplit = {
+      trainInputs, trainTargets, valInputs, valTargets, totalPurged,
+    };
+    this.deps.logger.info(
+      `Forecaster dataset assembled — train: ${trainInputs.length}, val: ${valInputs.length}, total purged: ${totalPurged}`
+    );
+  }
+
+  /**
+   * One-time CPU work for the AGENT series only: PPO trains on a single
+   * market, so features/volatility/forecasts are cached per-agent-symbol.
+   */
+  private precomputeAgentFeaturesAndVolatility(series: CandleSeries, input: TrainInput): void {
+    if (this.cachedAgentFeatures && this.cachedAgentVolatility) return;
+    this.deps.logger.info(`[agent ${input.agentSymbol.toString()}] precomputing features and volatility...`);
     const t0 = Date.now();
+    const { features } = this.buildSamples(series, input);
+    this.cachedAgentFeatures = features;
+    this.cachedAgentVolatility = this.computeVolatilitySeries(series);
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+    this.deps.logger.info(`Cached ${features.length} agent feature matrices in ${elapsed}s`);
+  }
+
+  private buildSamples(series: CandleSeries, input: TrainInput): SymbolSamples {
     const features: FeatureMatrix[] = [];
     const targets: number[][] = [];
     for (let i = input.windowSize; i < series.size() - input.horizon; i++) {
@@ -151,11 +238,7 @@ export class TrainModelsUseCase {
       features.push(this.deps.featureBuilder.build(window));
       targets.push(this.buildFutureReturns(series, i, input.horizon));
     }
-    this.cachedFeatures = features;
-    this.cachedTargets = targets;
-    this.cachedVolatility = this.computeVolatilitySeries(series);
-    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
-    this.deps.logger.info(`Cached ${features.length} feature matrices in ${elapsed}s`);
+    return { features, targets };
   }
 
   private computeVolatilitySeries(series: CandleSeries): number[] {
@@ -184,16 +267,17 @@ export class TrainModelsUseCase {
   }
 
   /**
-   * Single batched GPU call for all forecasts, after the BiLSTM is trained.
-   * Replaces ~750k individual batch=1 predict() calls inside the PPO loop.
+   * Single batched GPU call for all forecasts on the agent series, after
+   * the BiLSTM is trained. Replaces ~750k individual batch=1 predict()
+   * calls inside the PPO loop.
    */
-  private async precomputeForecasts(): Promise<void> {
-    if (!this.cachedFeatures) throw new Error("Features must be precomputed first");
-    this.deps.logger.info(`Precomputing ${this.cachedFeatures.length} forecasts in batch...`);
+  private async precomputeAgentForecasts(): Promise<void> {
+    if (!this.cachedAgentFeatures) throw new Error("Agent features must be precomputed first");
+    this.deps.logger.info(`Precomputing ${this.cachedAgentFeatures.length} agent forecasts in batch...`);
     const t0 = Date.now();
-    this.cachedForecasts = await this.deps.forecastModel.predictBatch(this.cachedFeatures);
+    this.cachedAgentForecasts = await this.deps.forecastModel.predictBatch(this.cachedAgentFeatures);
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
-    this.deps.logger.info(`Forecasts cached in ${elapsed}s`);
+    this.deps.logger.info(`Agent forecasts cached in ${elapsed}s`);
   }
 
   private async maybeTrainForecaster(
@@ -208,22 +292,15 @@ export class TrainModelsUseCase {
     this.deps.logger.info(
       `Training forecast model (from epoch ${state.completedEpochs} of ${input.forecastEpochs})`
     );
-    const allInputs = this.cachedFeatures!;
-    const allTargets = this.cachedTargets!;
-    const splitter = new PurgedEmbargoedSplit(input.horizon, EMBARGO_FRACTION);
-    const inputSplit = splitter.split(allInputs, VALIDATION_FRACTION);
-    const targetSplit = splitter.split(allTargets, VALIDATION_FRACTION);
-    this.deps.logger.info(
-      `Purged/embargoed split — train: ${inputSplit.train.length}, val: ${inputSplit.validation.length}, purged: ${inputSplit.purgedCount} (horizon=${input.horizon}, embargo=${(EMBARGO_FRACTION * 100).toFixed(1)}%)`
-    );
+    const split = this.cachedForecasterSplit!;
 
     return await this.deps.forecastModel.train(
-      inputSplit.train, targetSplit.train, input.forecastEpochs,
+      split.trainInputs, split.trainTargets, input.forecastEpochs,
       {
         initialState: state,
         validationData: {
-          inputs: inputSplit.validation,
-          targets: targetSplit.validation,
+          inputs: split.valInputs,
+          targets: split.valTargets,
         },
         onEpochEnd: async (current) => {
           if (this.shouldCheckpointAt(current.completedEpochs, input.forecastEpochs)) {
@@ -248,7 +325,7 @@ export class TrainModelsUseCase {
     }
     this.deps.agent.restoreTrainingState({ updateCount: state.updateCount });
     this.deps.logger.info(
-      `Training agent for ${input.rlEpisodes} episodes (from episode ${state.completedEpisodes})`
+      `Training agent for ${input.rlEpisodes} episodes on ${input.agentSymbol.toString()} (from episode ${state.completedEpisodes})`
     );
     let current = { ...state };
     for (let episode = state.completedEpisodes; episode < input.rlEpisodes; episode++) {
@@ -295,7 +372,8 @@ export class TrainModelsUseCase {
 
   private snapshotInput(input: TrainInput): TrainInputSnapshot {
     return {
-      symbol: input.symbol.toString(),
+      agentSymbol: input.agentSymbol.toString(),
+      forecasterSymbols: input.forecasterSymbols.map(s => s.toString()),
       historicalCandles: input.historicalCandles,
       windowSize: input.windowSize,
       horizon: input.horizon,
@@ -317,8 +395,8 @@ export class TrainModelsUseCase {
 
   private async runOneEpisode(series: CandleSeries, input: TrainInput): Promise<void> {
     const ctx: PositionContext = { position: 0, entryPrice: 0, barsInPosition: 0 };
-    const forecasts = this.cachedForecasts!;
-    const volatility = this.cachedVolatility!;
+    const forecasts = this.cachedAgentForecasts!;
+    const volatility = this.cachedAgentVolatility!;
     const offset = input.windowSize;
     const end = series.size() - input.horizon;
     for (let i = offset; i < end; i++) {
@@ -458,7 +536,8 @@ export interface TrainDependencies {
 }
 
 export interface TrainInput {
-  symbol: TradingSymbol;
+  agentSymbol: TradingSymbol;
+  forecasterSymbols: TradingSymbol[];
   historicalCandles: number;
   windowSize: number;
   horizon: number;
@@ -475,4 +554,17 @@ interface PositionContext {
   position: number;
   entryPrice: number;
   barsInPosition: number;
+}
+
+interface SymbolSamples {
+  features: FeatureMatrix[];
+  targets: number[][];
+}
+
+interface ForecasterSplit {
+  trainInputs: FeatureMatrix[];
+  trainTargets: number[][];
+  valInputs: FeatureMatrix[];
+  valTargets: number[][];
+  totalPurged: number;
 }

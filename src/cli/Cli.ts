@@ -1,5 +1,4 @@
 import { Container, Environment } from "./Container";
-import { TrainCommand } from "./commands/TrainCommand";
 import { TestCommand } from "./commands/TestCommand";
 import { InvestCommand } from "./commands/InvestCommand";
 
@@ -14,15 +13,12 @@ export class Cli {
   constructor(env: Environment) {
     const container = new Container(env);
     this.commands = new Map<string, Command>([
-      ["train", new TrainCommand(container)],
       ["test", new TestCommand(container)],
       ["invest", new InvestCommand(container)],
     ]);
   }
 
   async run(args: string[]): Promise<void> {
-    // Filter out --flag args (e.g. --device=gpu) so they don't get parsed as a mode.
-    // Flags are read directly by their consumers (e.g. tf.ts reads --device).
     const positional = args.filter(a => !a.startsWith("--"));
     const modeName = positional[0];
     if (!modeName) return this.printUsage();
@@ -35,7 +31,6 @@ export class Cli {
     console.log(`
 AI Trading Bot — available modes:
 
-  train    Train forecast model + RL agent with historical data
   test     Backtest on real Binance data (measures win rate, no money spent)
   invest   Apply REAL MONEY 24/7 (requires Binance credentials)
 
@@ -44,19 +39,15 @@ Flags:
                           auto = GPU if available, else CPU.
                           Can also be set via TF_DEVICE env var.
 
-  --checkpoint=<dir>      [train only] Save and resume training from <dir>.
-                          If <dir> contains a previous checkpoint, training
-                          resumes from the exact epoch/episode, restoring
-                          LR schedule and early-stopping memory.
-
-  --checkpoint-every=<n>  [train only] Save a checkpoint every N epochs
-                          (forecaster) or episodes (agent). Default: 5.
+Import pre-trained models from Kaggle:
+  1. Run the notebook: https://www.kaggle.com/code/acaurangel/bilstm-ppo-self-attention-ai-spot-trading
+  2. Download tfjs_models.zip from the Kaggle output panel.
+  3. Extract the zip into ./models/
 
 Usage:
-  npm run train
-  npm run train -- --device=gpu
-  npm run train -- --checkpoint=./checkpoints/run-1 --checkpoint-every=5
+  npm run test:strategy
   npm run test:strategy -- --device=cpu
+  npm run invest
     `);
   }
 

@@ -33,7 +33,8 @@ export class SelfAttentionLayer extends tf.layers.Layer {
 
   constructor(config: SelfAttentionConfig) {
     super(config as unknown as TF.serialization.ConfigDict);
-    this.dModel = config.dModel;
+    // Accept both camelCase (TS) and snake_case (Kaggle/Python serialization).
+    this.dModel = config.dModel ?? (config as unknown as { d_model: number }).d_model;
   }
 
   build(inputShape: TF.Shape | TF.Shape[]): void {

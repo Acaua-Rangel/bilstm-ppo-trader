@@ -7,58 +7,15 @@ import { FeatureMatrix } from "../collections/FeatureMatrix";
 export interface ForecastModel {
   predict(features: FeatureMatrix): Promise<ReadonlyArray<number>>;
   /**
-   * Batch prediction — processes many feature matrices in a single GPU call.
-   * Used during PPO training to avoid 700k+ individual batch=1 GPU launches.
-   * Returns one forecast (length `horizon`) per input.
-   */
-  predictBatch(features: FeatureMatrix[]): Promise<number[][]>;
-  /**
    * Monte Carlo Dropout ensemble: runs `runs` forward passes with dropout
    * active and reports mean, variance and a 1/(1+variance) confidence.
    * Used at inference to gate low-confidence trades without retraining.
    */
   predictWithUncertainty(features: FeatureMatrix, runs?: number): Promise<EnsembleResult>;
-  train(
-    inputs: FeatureMatrix[],
-    targets: number[][],
-    epochs: number,
-    options?: ForecastTrainOptions
-  ): Promise<ForecasterTrainingState>;
 }
 
 export interface EnsembleResult {
   mean: ReadonlyArray<number>;
   variance: ReadonlyArray<number>;
   confidence: ReadonlyArray<number>;
-}
-
-export interface ForecastTrainOptions {
-  initialState?: ForecasterTrainingState;
-  onEpochEnd?: (state: ForecasterTrainingState) => Promise<void>;
-  /**
-   * Explicit validation set. When provided, the adapter must use this set
-   * for `val_loss` (and skip its internal random split). Pre-split by the
-   * use case with purge + embargo so the validation samples have no target
-   * overlap with the training samples.
-   */
-  validationData?: ValidationData;
-}
-
-export interface ValidationData {
-  inputs: FeatureMatrix[];
-  targets: number[][];
-}
-
-/**
- * Snapshot of forecaster training progress.
- * Persisted in checkpoints and used to resume training from the exact epoch,
- * preserving early-stopping memory and the cosine annealing schedule.
- *
- * Note: Adam optimizer momentum is NOT preserved on resume — first epoch
- * after resume may show a small gradient instability.
- */
-export interface ForecasterTrainingState {
-  completedEpochs: number;
-  bestValLoss: number;
-  patienceCount: number;
 }

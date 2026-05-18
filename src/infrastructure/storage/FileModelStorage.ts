@@ -4,7 +4,18 @@ import { BiLSTMForecaster } from "../models/BiLSTMForecaster";
 import { PPODecisionAgent } from "../models/PPODecisionAgent";
 
 /**
- * Adapter: filesystem persistence.
+ * Adapter: loads pre-trained models (tfjs_graph_model / tfjs_layers_model) from
+ * the local filesystem.
+ *
+ * Models are trained on Kaggle and exported automatically during the run:
+ *   https://www.kaggle.com/code/acaurangel/bilstm-ppo-self-attention-ai-spot-trading
+ *
+ * Setup:
+ *   1. Download tfjs_models.zip from the Kaggle output panel.
+ *   2. Extract the zip into ./models/ — the expected structure is:
+ *        models/bilstm/model.json          ← BiLSTM (graph model)
+ *        models/ppo/policy/model.json      ← PPO actor (layers model)
+ *        models/ppo/value/model.json       ← PPO critic (layers model)
  */
 export class FileModelStorage implements ModelStorage {
   constructor(
@@ -12,33 +23,23 @@ export class FileModelStorage implements ModelStorage {
     private readonly agent: PPODecisionAgent
   ) {}
 
-  async saveForecastModel(path: string): Promise<void> {
-    fs.mkdirSync(path, { recursive: true });
-    await this.forecaster.save(path);
-  }
-
   async loadForecastModel(path: string): Promise<void> {
-    this.assertExists(`${path}/model.json`, "npm run train");
+    this.assertExists(`${path}/model.json`, path);
     await this.forecaster.load(path);
   }
 
-  async saveAgent(path: string): Promise<void> {
-    // tfjs saves to ${path}/policy and ${path}/value — pre-create both.
-    fs.mkdirSync(`${path}/policy`, { recursive: true });
-    fs.mkdirSync(`${path}/value`, { recursive: true });
-    await this.agent.save(path);
-  }
-
   async loadAgent(path: string): Promise<void> {
-    this.assertExists(`${path}/policy/model.json`, "npm run train");
+    this.assertExists(`${path}/policy/model.json`, path);
     await this.agent.load(path);
   }
 
-  private assertExists(filePath: string, hint: string): void {
+  private assertExists(filePath: string, modelPath: string): void {
     if (!fs.existsSync(filePath)) {
       throw new Error(
         `Model not found: "${filePath}"\n` +
-        `Run "${hint}" before using this command.`
+        `Download tfjs_models.zip from the Kaggle output panel and extract into ./models/\n` +
+        `Notebook: https://www.kaggle.com/code/acaurangel/bilstm-ppo-self-attention-ai-spot-trading\n` +
+        `Expected: ${modelPath}`
       );
     }
   }

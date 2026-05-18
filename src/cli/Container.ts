@@ -7,7 +7,6 @@ import { ConservativeRiskPolicy } from "../infrastructure/risk/ConservativeRiskP
 import { PaperExecutor } from "../infrastructure/execution/PaperExecutor";
 import { BinanceLiveExecutor } from "../infrastructure/execution/BinanceLiveExecutor";
 import { FileModelStorage } from "../infrastructure/storage/FileModelStorage";
-import { CheckpointManager } from "../infrastructure/storage/CheckpointManager";
 import { SystemClock } from "../infrastructure/clock/SystemClock";
 import { HistoricalClock } from "../infrastructure/clock/HistoricalClock";
 import { PlaybackCursor } from "../infrastructure/clock/PlaybackCursor";
@@ -60,8 +59,8 @@ export class Container {
     this.logger = new ConsoleLogger();
     this.marketData = new BinanceMarketData(env.timeframe);
     this.featureBuilder = new FeatureBuilder(64);
-    this.forecaster = new BiLSTMForecaster(this.biLSTMConfig());
-    this.agent = new PPODecisionAgent(this.ppoConfig());
+    this.forecaster = new BiLSTMForecaster();
+    this.agent = new PPODecisionAgent();
     this.risk = new ConservativeRiskPolicy(this.riskConfig());
     this.storage = new FileModelStorage(this.forecaster, this.agent);
     this.regimeFilter = new RegimeFilter();
@@ -105,9 +104,6 @@ export class Container {
     const fullSeries = await this.marketData.fetchRecentCandles(
       this.symbol, historicalCandles, 0
     );
-    // The first `calibrationCandles` form the warm-up set. The backtest cursor
-    // starts where the calibration window ends, so the data the calibrator was
-    // fit on never overlaps with the data being traded.
     const startIndex = Math.max(
       Math.min(windowSize, fullSeries.size() - 1),
       Math.min(calibrationCandles, fullSeries.size() - 1)
@@ -132,10 +128,6 @@ export class Container {
 
   // --- Shared --------------------------------------------------------------
 
-  buildCheckpointManager(directory: string): CheckpointManager {
-    return new CheckpointManager(directory, this.storage);
-  }
-
   buildTradingCycle(executor: TradeExecutor, marketData: MarketDataProvider): TradingCycle {
     return new TradingCycle({
       marketData,
@@ -150,23 +142,6 @@ export class Container {
       stopLossPct: this.env.stopLossPct,
       takeProfitPct: this.env.takeProfitPct,
     });
-  }
-
-  private biLSTMConfig() {
-    return {
-      seqLen: 64, numFeatures: 10,
-      hiddenUnits: 64, dropout: 0.2, horizon: 4,
-      learningRate: 1e-3, minLR: 1e-5,
-      l2: 1e-4, earlyStoppingPatience: 15,
-    };
-  }
-
-  private ppoConfig() {
-    return {
-      stateSize: 13, actionSize: 3, gamma: 0.99,
-      clipRatio: 0.2, policyLR: 3e-4, valueLR: 1e-3,
-      minLR: 1e-5, lrDecay: 0.99, maxGradNorm: 0.5, epochs: 10,
-    };
   }
 
   private riskConfig() {

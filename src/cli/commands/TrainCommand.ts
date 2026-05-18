@@ -27,6 +27,8 @@ export class TrainCommand implements Command {
       forecastModelPath: "./models/bilstm",
       agentPath: "./models/ppo",
       stopLossPct: this.container.environment.stopLossPct,
+      takeProfitPct: this.container.environment.takeProfitPct,
+      slippagePct: this.container.environment.slippagePct,
     });
   }
 

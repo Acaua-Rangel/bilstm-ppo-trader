@@ -59,7 +59,7 @@ export class TradingCycle {
     const stateFeatures = this.buildStateVector(series, forecast, position, currentPrice.toNumber());
     const decision = await this.dependencies.agent.decide(stateFeatures);
 
-    const candidate = this.applyStopLoss(decision.action, position, currentPrice.toNumber());
+    const candidate = this.applyExitGuards(decision.action, position, currentPrice.toNumber());
     const filtered = this.applyAccuracyFilters(candidate, series, ensemble);
     const execution = await this.executeDecision(filtered, currentPrice, position);
     return { ...execution, forecast };
@@ -124,12 +124,23 @@ export class TradingCycle {
     return position;
   }
 
-  private applyStopLoss(action: TradingAction, position: number, currentPrice: number): TradingAction {
+  /**
+   * Hard exits — applied before the accuracy filters and before any agent
+   * vote can suppress a SELL. Symmetric stop-loss and take-profit cap the
+   * realized W:L the PPO can produce on its own.
+   */
+  private applyExitGuards(action: TradingAction, position: number, currentPrice: number): TradingAction {
     if (position !== 1 || this.entryPrice === 0) return action;
     const pnl = (currentPrice - this.entryPrice) / this.entryPrice;
     if (pnl <= -this.configuration.stopLossPct) {
       this.dependencies.logger.warn(
         `Stop loss triggered at ${(pnl * 100).toFixed(2)}% — forcing SELL`
+      );
+      return TradingAction.SELL;
+    }
+    if (pnl >= this.configuration.takeProfitPct) {
+      this.dependencies.logger.info(
+        `Take profit triggered at ${(pnl * 100).toFixed(2)}% — forcing SELL`
       );
       return TradingAction.SELL;
     }
@@ -237,6 +248,7 @@ export interface TradingCycleDependencies {
 export interface TradingCycleConfig {
   symbol: TradingSymbol;
   stopLossPct: number;
+  takeProfitPct: number;
 }
 
 export interface CycleResult {

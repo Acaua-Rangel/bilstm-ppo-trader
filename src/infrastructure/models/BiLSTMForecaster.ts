@@ -154,16 +154,30 @@ export class BiLSTMForecaster implements ForecastModel {
     const remainingEpochs = totalEpochs - state.completedEpochs;
     const xTensor = tf.tensor3d(inputs.map(m => m.toRawArray()));
     const yTensor = tf.tensor2d(targets);
+    const validationTensors = this.buildValidationTensors(options?.validationData);
     await this.model.fit(xTensor, yTensor, {
       epochs: remainingEpochs,
       batchSize: 256,
-      validationSplit: 0.1,
+      // When an explicit validation set is supplied (purged + embargoed by the
+      // use case), use it. Otherwise fall back to the random trailing split.
+      validationSplit: validationTensors === null ? 0.1 : undefined,
+      validationData: validationTensors ?? undefined,
       shuffle: true,
       verbose: 1,
       callbacks: this.makeTrainingCallback(totalEpochs, state, options?.onEpochEnd),
     });
     tf.dispose([xTensor, yTensor]);
+    if (validationTensors !== null) tf.dispose(validationTensors);
     return state;
+  }
+
+  private buildValidationTensors(
+    validation?: { inputs: FeatureMatrix[]; targets: number[][] }
+  ): [TF.Tensor3D, TF.Tensor2D] | null {
+    if (!validation || validation.inputs.length === 0) return null;
+    const x = tf.tensor3d(validation.inputs.map(m => m.toRawArray()));
+    const y = tf.tensor2d(validation.targets);
+    return [x, y];
   }
 
   // Single callback combining cosine annealing (onEpochBegin) and early stopping (onEpochEnd).

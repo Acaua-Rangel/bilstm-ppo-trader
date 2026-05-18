@@ -4,6 +4,7 @@ import { DecisionAgent } from "../../domain/ports/DecisionAgent";
 import { ModelStorage } from "../../domain/ports/ModelStorage";
 import { Logger } from "../../domain/ports/Logger";
 import { FeatureBuilder } from "../services/FeatureBuilder";
+import { PurgedEmbargoedSplit } from "../services/PurgedEmbargoedSplit";
 import { TradingSymbol } from "../../domain/value-objects/TradingSymbol";
 import { CandleSeries } from "../../domain/collections/CandleSeries";
 import { FeatureMatrix } from "../../domain/collections/FeatureMatrix";
@@ -26,6 +27,12 @@ const FEE_RATE = 0.001;
 // Both come from the same single download, so the split is internal and
 // the training window always includes the most recent data possible.
 const BACKTEST_HOLDOUT_CANDLES = 1000;
+// Fraction of (post-purge) samples held out for forecaster validation.
+const VALIDATION_FRACTION = 0.1;
+// Embargo fraction (López de Prado): drops samples adjacent to the
+// validation set to neutralize serial correlation that survives the
+// label horizon. 1% is a conservative default for hourly candles.
+const EMBARGO_FRACTION = 0.01;
 
 /**
  * Use Case: trains the forecast model (BiLSTM) and decision agent (PPO).
@@ -201,14 +208,23 @@ export class TrainModelsUseCase {
     this.deps.logger.info(
       `Training forecast model (from epoch ${state.completedEpochs} of ${input.forecastEpochs})`
     );
-    const inputs = this.cachedFeatures!;
-    const targets = this.cachedTargets!;
-    this.deps.logger.info(`Training samples: ${inputs.length}`);
+    const allInputs = this.cachedFeatures!;
+    const allTargets = this.cachedTargets!;
+    const splitter = new PurgedEmbargoedSplit(input.horizon, EMBARGO_FRACTION);
+    const inputSplit = splitter.split(allInputs, VALIDATION_FRACTION);
+    const targetSplit = splitter.split(allTargets, VALIDATION_FRACTION);
+    this.deps.logger.info(
+      `Purged/embargoed split — train: ${inputSplit.train.length}, val: ${inputSplit.validation.length}, purged: ${inputSplit.purgedCount} (horizon=${input.horizon}, embargo=${(EMBARGO_FRACTION * 100).toFixed(1)}%)`
+    );
 
     return await this.deps.forecastModel.train(
-      inputs, targets, input.forecastEpochs,
+      inputSplit.train, targetSplit.train, input.forecastEpochs,
       {
         initialState: state,
+        validationData: {
+          inputs: inputSplit.validation,
+          targets: targetSplit.validation,
+        },
         onEpochEnd: async (current) => {
           if (this.shouldCheckpointAt(current.completedEpochs, input.forecastEpochs)) {
             await this.saveCheckpoint("forecaster", input, current, agentState, createdAt);
@@ -312,8 +328,10 @@ export class TrainModelsUseCase {
       const decision = await this.deps.agent.decide(state);
 
       const currentClose = series.at(i).closePrice().toNumber();
-      const effectiveAction = this.applyStopLoss(decision.action, ctx, currentClose, input.stopLossPct);
-      const reward = this.computeReward(series, i, effectiveAction, ctx);
+      const effectiveAction = this.applyExitGuards(
+        decision.action, ctx, currentClose, input.stopLossPct, input.takeProfitPct
+      );
+      const reward = this.computeReward(series, i, effectiveAction, ctx, input.slippagePct);
       this.updateContext(ctx, effectiveAction, currentClose);
 
       this.deps.agent.recordExperience({
@@ -353,26 +371,37 @@ export class TrainModelsUseCase {
     return (currentClose - ctx.entryPrice) / ctx.entryPrice;
   }
 
-  private applyStopLoss(
+  /**
+   * Mirrors TradingCycle.applyExitGuards so the agent learns inside the
+   * same exit envelope it will face in TEST and INVEST. Without this the
+   * policy could discover entry strategies that only work without a TP cap.
+   */
+  private applyExitGuards(
     action: TradingAction, ctx: PositionContext,
-    currentClose: number, stopLossPct: number
+    currentClose: number, stopLossPct: number, takeProfitPct: number
   ): TradingAction {
     if (ctx.position !== 1) return action;
     const pnl = this.computeUnrealizedPnL(currentClose, ctx);
     if (pnl <= -stopLossPct) return TradingAction.SELL;
+    if (pnl >= takeProfitPct) return TradingAction.SELL;
     return action;
   }
 
   /**
    * Long-only reward, in units of next-candle return:
    *   in position + HOLD/BUY  → priceReturn (continue holding)
-   *   in position + SELL      → realized PnL on exit (closes the trade)
-   *   flat + BUY              → priceReturn − fee (entry reward)
+   *   in position + SELL      → realized PnL on exit (closes the trade) − fees − round-trip slippage
+   *   flat + BUY              → priceReturn − fee − entry slippage
    *   flat + SELL/HOLD        → small idle penalty
+   *
+   * Slippage is charged on both entry and exit because the live executor
+   * eats the spread on every market order. Modeling it here aligns the
+   * training environment with PaperExecutor and BinanceLiveExecutor.
    */
   private computeReward(
     series: CandleSeries, i: number,
-    action: TradingAction, ctx: PositionContext
+    action: TradingAction, ctx: PositionContext,
+    slippagePct: number
   ): number {
     const currentClose = series.at(i).closePrice().toNumber();
     const nextClose = series.at(i + 1).closePrice().toNumber();
@@ -380,11 +409,11 @@ export class TrainModelsUseCase {
     if (ctx.position === 1) {
       if (action.isSell()) {
         const realized = this.computeUnrealizedPnL(currentClose, ctx);
-        return realized - 2 * FEE_RATE;
+        return realized - 2 * FEE_RATE - 2 * slippagePct;
       }
       return priceReturn;
     }
-    if (action.isBuy()) return priceReturn - FEE_RATE;
+    if (action.isBuy()) return priceReturn - FEE_RATE - slippagePct;
     return -0.0001;
   }
 
@@ -438,6 +467,8 @@ export interface TrainInput {
   forecastModelPath: string;
   agentPath: string;
   stopLossPct: number;
+  takeProfitPct: number;
+  slippagePct: number;
 }
 
 interface PositionContext {

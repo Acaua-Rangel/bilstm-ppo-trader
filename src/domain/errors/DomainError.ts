@@ -22,3 +22,14 @@ export class MarketDataError extends DomainError {
     super(`Market data error: ${reason}`);
   }
 }
+
+/**
+ * Thrown when the exchange is unreachable or rate-limiting us past the
+ * retry budget. The session loop treats this as fatal: better to halt
+ * than to keep blindly retrying with an open position.
+ */
+export class ExchangeUnavailableError extends DomainError {
+  constructor(reason: string) {
+    super(`Exchange unavailable: ${reason}`);
+  }
+}

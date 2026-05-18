@@ -35,6 +35,18 @@ export interface EnsembleResult {
 export interface ForecastTrainOptions {
   initialState?: ForecasterTrainingState;
   onEpochEnd?: (state: ForecasterTrainingState) => Promise<void>;
+  /**
+   * Explicit validation set. When provided, the adapter must use this set
+   * for `val_loss` (and skip its internal random split). Pre-split by the
+   * use case with purge + embargo so the validation samples have no target
+   * overlap with the training samples.
+   */
+  validationData?: ValidationData;
+}
+
+export interface ValidationData {
+  inputs: FeatureMatrix[];
+  targets: number[][];
 }
 
 /**

@@ -94,7 +94,7 @@ export class Container {
   // --- Replay (TEST) wiring ----------------------------------------------
 
   buildPaperExecutor(): TradeExecutor {
-    return new PaperExecutor(this.initialCapital, this.logger);
+    return new PaperExecutor(this.initialCapital, this.env.slippagePct, this.logger);
   }
 
   async buildReplaySetup(
@@ -145,7 +145,11 @@ export class Container {
       regimeFilter: this.regimeFilter,
       calibrator: this.calibrator,
       adaptiveThreshold: this.adaptiveThreshold,
-    }, { symbol: this.symbol, stopLossPct: this.env.stopLossPct });
+    }, {
+      symbol: this.symbol,
+      stopLossPct: this.env.stopLossPct,
+      takeProfitPct: this.env.takeProfitPct,
+    });
   }
 
   private biLSTMConfig() {
@@ -169,6 +173,7 @@ export class Container {
     return {
       maxPositionRiskPct: this.env.maxPositionRiskPct,
       stopLossPct: this.env.stopLossPct,
+      takeProfitPct: this.env.takeProfitPct,
       maxDrawdownPct: this.env.maxDailyDrawdownPct,
     };
   }
@@ -189,7 +194,9 @@ export interface Environment {
   initialCapitalUsd: number;
   maxPositionRiskPct: number;
   stopLossPct: number;
+  takeProfitPct: number;
   maxDailyDrawdownPct: number;
+  slippagePct: number;
   binanceApiKey: string;
   binanceApiSecret: string;
   binanceTestnet: boolean;

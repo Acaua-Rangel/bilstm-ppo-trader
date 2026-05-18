@@ -1,4 +1,5 @@
 import { TradingCycle } from "../services/TradingCycle";
+import { DailyEquityBaseline } from "../services/DailyEquityBaseline";
 import { Clock } from "../../domain/ports/Clock";
 import { SessionObserver } from "../../domain/ports/SessionObserver";
 import { TradeExecutor } from "../../domain/ports/TradeExecutor";
@@ -9,7 +10,10 @@ import { MarketDataProvider } from "../../domain/ports/MarketDataProvider";
 import { TradingSymbol } from "../../domain/value-objects/TradingSymbol";
 import { Money } from "../../domain/value-objects/Money";
 import { Price } from "../../domain/value-objects/Price";
-import { RiskLimitExceededError } from "../../domain/errors/DomainError";
+import {
+  RiskLimitExceededError,
+  ExchangeUnavailableError,
+} from "../../domain/errors/DomainError";
 
 /**
  * Use Case: a single trading session.
@@ -23,13 +27,18 @@ import { RiskLimitExceededError } from "../../domain/errors/DomainError";
  *
  * Guarantees:
  *  - Verifies the executor matches the expected mode (live or paper).
- *  - Circuit breaker on drawdown — uses total equity (cash + holding), not just cash.
+ *  - Circuit breaker on drawdown — measured against a UTC-daily baseline
+ *    so the limit resets at 00:00 UTC instead of silently becoming a
+ *    session-total limit on long-running deployments.
+ *  - ExchangeUnavailableError is fatal: better to halt than to keep
+ *    pinging a broken API with capital exposed.
  *  - Graceful shutdown on SIGINT/SIGTERM (cancels the clock so a long sleep aborts).
  *  - Retries with a configurable backoff on transient errors.
  */
 export class TradingSessionUseCase {
   private shouldStop = false;
   private initialEquity: Money = Money.zero();
+  private dailyBaseline: DailyEquityBaseline | null = null;
 
   constructor(private readonly deps: SessionDependencies) {}
 
@@ -38,6 +47,7 @@ export class TradingSessionUseCase {
     this.registerShutdownHandlers();
     await this.loadModels(input);
     this.initialEquity = await this.computeEquity(null);
+    this.dailyBaseline = new DailyEquityBaseline(this.initialEquity, new Date());
     this.deps.observer.onSessionStart({ initialEquity: this.initialEquity, mode: input.mode });
 
     const halted = await this.runLoop(input);
@@ -69,6 +79,7 @@ export class TradingSessionUseCase {
   private async runTick(): Promise<void> {
     const result = await this.deps.cycle.executeOnce();
     const equity = await this.computeEquity(result.price);
+    this.rolloverDailyBaselineIfNeeded(equity);
     this.deps.observer.onTick({
       action: result.action,
       price: result.price,
@@ -80,14 +91,26 @@ export class TradingSessionUseCase {
 
   private async circuitBreakerTripped(): Promise<boolean> {
     const equity = await this.computeEquity(null);
-    if (!this.deps.risk.shouldHaltTrading(this.initialEquity, equity)) return false;
-    this.deps.logger.error("CIRCUIT BREAKER TRIGGERED", {
-      initialEquity: this.initialEquity.toString(),
+    this.rolloverDailyBaselineIfNeeded(equity);
+    const baseline = this.dailyBaseline?.current() ?? this.initialEquity;
+    if (!this.deps.risk.shouldHaltTrading(baseline, equity)) return false;
+    this.deps.logger.error("CIRCUIT BREAKER TRIGGERED (daily drawdown)", {
+      dailyBaseline: baseline.toString(),
       currentEquity: equity.toString(),
+      utcDay: this.dailyBaseline?.dayKey(),
     });
     this.shouldStop = true;
     this.deps.clock.cancel();
     return true;
+  }
+
+  private rolloverDailyBaselineIfNeeded(currentEquity: Money): void {
+    if (this.dailyBaseline === null) return;
+    if (!this.dailyBaseline.observe(currentEquity, new Date())) return;
+    this.deps.logger.info("Daily equity baseline rolled over (UTC)", {
+      utcDay: this.dailyBaseline.dayKey(),
+      baseline: this.dailyBaseline.current().toString(),
+    });
   }
 
   private async computeEquity(referencePrice: Price | null): Promise<Money> {
@@ -111,6 +134,12 @@ export class TradingSessionUseCase {
   private async handleTickError(error: unknown, input: SessionInput): Promise<boolean> {
     if (error instanceof RiskLimitExceededError) {
       this.deps.logger.error("Risk limit exceeded", { reason: String(error) });
+      this.shouldStop = true;
+      this.deps.clock.cancel();
+      return true;
+    }
+    if (error instanceof ExchangeUnavailableError) {
+      this.deps.logger.error("KILL SWITCH — exchange unavailable", { reason: String(error) });
       this.shouldStop = true;
       this.deps.clock.cancel();
       return true;

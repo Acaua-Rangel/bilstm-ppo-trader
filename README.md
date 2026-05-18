@@ -198,7 +198,9 @@ npm run test:strategy -- --device=cpu
 | `INITIAL_CAPITAL_USD` | Starting capital in USD | `1000` |
 | `MAX_POSITION_RISK_PCT` | Fraction of cash used per trade | `0.1` |
 | `STOP_LOSS_PCT` | Stop-loss threshold | `0.02` |
-| `MAX_DAILY_DRAWDOWN_PCT` | Circuit breaker threshold | `0.05` |
+| `TAKE_PROFIT_PCT` | Take-profit threshold (symmetric to SL) | `0.02` |
+| `MAX_DAILY_DRAWDOWN_PCT` | Circuit breaker — resets at 00:00 UTC | `0.05` |
+| `SLIPPAGE_PCT` | Market-order slippage per side (paper + reward) | `0.0005` |
 | `BINANCE_API_KEY` | Binance API key (invest mode only) | — |
 | `BINANCE_API_SECRET` | Binance API secret (invest mode only) | — |
 | `BINANCE_TESTNET` | Use Binance testnet | `true` |

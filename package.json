@@ -6,13 +6,16 @@
   "scripts": {
     "build": "tsc",
     "start": "ts-node src/main.ts",
-    "train": "ts-node src/main.ts train",
-    "train:gpu": "ts-node src/main.ts train --device=gpu",
-    "train:cpu": "ts-node src/main.ts train --device=cpu",
-    "test:strategy": "ts-node src/main.ts test",
-    "test:strategy:gpu": "ts-node src/main.ts test --device=gpu",
+    "train": "node --max-old-space-size=8192 -r ts-node/register src/main.ts train",
+    "train:gpu": "node --max-old-space-size=8192 -r ts-node/register src/main.ts train --device=gpu",
+    "train:cpu": "node --max-old-space-size=8192 -r ts-node/register src/main.ts train --device=cpu",
+    "test:strategy": "node --max-old-space-size=4096 -r ts-node/register src/main.ts test",
+    "test:strategy:gpu": "node --max-old-space-size=4096 -r ts-node/register src/main.ts test --device=gpu",
     "invest": "ts-node src/main.ts invest",
-    "lint": "eslint src --ext .ts"
+    "lint": "eslint src --ext .ts",
+    "setup:cuda": "powershell -ExecutionPolicy Bypass -File scripts/setup-cuda.ps1",
+    "train:cuda118": "powershell -ExecutionPolicy Bypass -File scripts/run-with-cuda118.ps1 npm run train:gpu",
+    "test:strategy:cuda118": "powershell -ExecutionPolicy Bypass -File scripts/run-with-cuda118.ps1 npm run test:strategy:gpu"
   },
   "dependencies": {
     "@tensorflow/tfjs-node": "^4.17.0",

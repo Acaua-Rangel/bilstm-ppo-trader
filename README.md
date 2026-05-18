@@ -189,7 +189,39 @@ You'll see a line at startup like:
 npm install @tensorflow/tfjs-node-gpu
 ```
 
-Requirements: NVIDIA GPU with CUDA Toolkit and cuDNN installed (versions matching the tfjs-node-gpu release notes).
+Requirements: NVIDIA GPU with CUDA Toolkit 11.8 and cuDNN 8.6 installed (the versions tfjs-node-gpu 4.x is built against).
+
+#### Windows — automated setup (CUDA 11.8 side-by-side)
+
+The repo ships a PowerShell installer that downloads and installs the exact CUDA version tfjs-node-gpu wants, **without touching your NVIDIA driver** or any other CUDA toolkit you already have. Multiple CUDA versions live in separate `v11.x`/`v12.x` folders by design — they don't conflict.
+
+```powershell
+# 1. Install CUDA 11.8 toolkit (downloads ~3 GB, runtime components only)
+npm run setup:cuda
+
+# 2. Download cuDNN 8.6 manually (NVIDIA login required, can't be automated):
+#    https://developer.nvidia.com/rdp/cudnn-archive
+#    → "Download cuDNN v8.6.0 (October 3rd, 2022), for CUDA 11.x"
+#    → "Local Installer for Windows (Zip)"
+# 3. Feed the ZIP back to the script:
+powershell -ExecutionPolicy Bypass -File scripts/setup-cuda.ps1 -CudnnZip "C:\Downloads\cudnn-windows-x86_64-8.6.0.163_cuda11-archive.zip"
+
+# 4. Install the GPU TF.js bindings
+npm install @tensorflow/tfjs-node-gpu
+
+# 5. Train/backtest with CUDA 11.8 scoped to the process
+#    (your system PATH stays as it was — other CUDA versions remain default
+#     for whatever else uses them)
+npm run train:cuda118
+npm run test:strategy:cuda118
+```
+
+The wrapper [scripts/run-with-cuda118.ps1](scripts/run-with-cuda118.ps1) can prefix any command:
+
+```powershell
+.\scripts\run-with-cuda118.ps1 nvcc --version
+.\scripts\run-with-cuda118.ps1 npx ts-node src/main.ts invest --device=gpu
+```
 
 ### Convenience scripts
 

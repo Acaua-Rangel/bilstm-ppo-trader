@@ -85,7 +85,10 @@ export class BiLSTMForecaster implements ForecastModel {
   }
 
   async predict(features: FeatureMatrix): Promise<ReadonlyArray<number>> {
-    const inputTensor = tf.tensor3d([features.toRawArray()]);
+    const inputTensor = tf.tensor3d(
+      features.flatView(),
+      [1, features.windowSize(), features.featuresPerStep()]
+    );
     const output = this.model.predict(inputTensor) as TF.Tensor;
     const result = Array.from(await output.data());
     tf.dispose([inputTensor, output]);
@@ -103,7 +106,10 @@ export class BiLSTMForecaster implements ForecastModel {
     features: FeatureMatrix, runs: number = 20
   ): Promise<EnsembleResult> {
     if (runs < 1) throw new Error("predictWithUncertainty: runs must be >= 1");
-    const inputTensor = tf.tensor3d([features.toRawArray()]);
+    const inputTensor = tf.tensor3d(
+      features.flatView(),
+      [1, features.windowSize(), features.featuresPerStep()]
+    );
     const predictions: number[][] = [];
     try {
       for (let i = 0; i < runs; i++) {
@@ -143,7 +149,7 @@ export class BiLSTMForecaster implements ForecastModel {
     const results: number[][] = [];
     for (let start = 0; start < features.length; start += CHUNK) {
       const slice = features.slice(start, start + CHUNK);
-      const inputTensor = tf.tensor3d(slice.map(m => m.toRawArray()));
+      const inputTensor = this.stackToTensor3D(slice);
       const output = this.model.predict(inputTensor) as TF.Tensor;
       const flat = Array.from(await output.data());
       tf.dispose([inputTensor, output]);
@@ -176,7 +182,7 @@ export class BiLSTMForecaster implements ForecastModel {
     }
 
     const remainingEpochs = totalEpochs - state.completedEpochs;
-    const xTensor = tf.tensor3d(inputs.map(m => m.toRawArray()));
+    const xTensor = this.stackToTensor3D(inputs);
     const yTensor = tf.tensor2d(targets);
     const validationTensors = this.buildValidationTensors(options?.validationData);
     await this.model.fit(xTensor, yTensor, {
@@ -199,9 +205,27 @@ export class BiLSTMForecaster implements ForecastModel {
     validation?: { inputs: FeatureMatrix[]; targets: number[][] }
   ): [TF.Tensor3D, TF.Tensor2D] | null {
     if (!validation || validation.inputs.length === 0) return null;
-    const x = tf.tensor3d(validation.inputs.map(m => m.toRawArray()));
+    const x = this.stackToTensor3D(validation.inputs);
     const y = tf.tensor2d(validation.targets);
     return [x, y];
+  }
+
+  /**
+   * Stacks an array of FeatureMatrix into a single tensor3d via one flat
+   * Float32Array copy. Avoids the `array.map(m => m.toRawArray())` path,
+   * which materializes one nested number[][] per matrix and OOMs the JS
+   * heap at the 200k-sample scale used by the multi-symbol forecaster.
+   */
+  private stackToTensor3D(features: FeatureMatrix[]): TF.Tensor3D {
+    if (features.length === 0) throw new Error("stackToTensor3D: empty input");
+    const rows = features[0].windowSize();
+    const cols = features[0].featuresPerStep();
+    const stride = rows * cols;
+    const flat = new Float32Array(features.length * stride);
+    for (let i = 0; i < features.length; i++) {
+      flat.set(features[i].flatView(), i * stride);
+    }
+    return tf.tensor3d(flat, [features.length, rows, cols]);
   }
 
   // Single callback combining cosine annealing (onEpochBegin) and early stopping (onEpochEnd).

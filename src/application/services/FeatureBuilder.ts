@@ -17,7 +17,7 @@ export class FeatureBuilder {
     const lastWindow = series.lastN(this.windowSize);
     const indicators = this.computeIndicators(series);
     const rows = this.buildRows(lastWindow, indicators);
-    return new FeatureMatrix(rows);
+    return FeatureMatrix.fromRows(rows);
   }
 
   private computeIndicators(series: CandleSeries): IndicatorBundle {

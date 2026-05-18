@@ -52,9 +52,20 @@ export class SelfAttentionLayer extends tf.layers.Layer {
   call(inputs: TF.Tensor | TF.Tensor[]): TF.Tensor {
     return tf.tidy(() => {
       const x = (Array.isArray(inputs) ? inputs[0] : inputs) as TF.Tensor3D;
-      const q = tf.matMul(x, this.wq.read());
-      const k = tf.matMul(x, this.wk.read());
-      const v = tf.matMul(x, this.wv.read());
+      const seqLen = x.shape[1] as number;
+      const dIn = x.shape[2] as number;
+      // tfjs-node 4.x has a buggy gradient for the 3D-by-2D matMul broadcast:
+      // backprop returns a [batch, dIn, dModel] tensor where the weight expects
+      // [dIn, dModel], and the optimizer rejects the shape mismatch. Flattening
+      // batch+time into a single axis turns it into a plain 2D-by-2D matmul,
+      // whose gradient is well-defined.
+      const xFlat = x.reshape([-1, dIn]) as TF.Tensor2D;
+      const qFlat = tf.matMul(xFlat, this.wq.read());
+      const kFlat = tf.matMul(xFlat, this.wk.read());
+      const vFlat = tf.matMul(xFlat, this.wv.read());
+      const q = qFlat.reshape([-1, seqLen, this.dModel]) as TF.Tensor3D;
+      const k = kFlat.reshape([-1, seqLen, this.dModel]) as TF.Tensor3D;
+      const v = vFlat.reshape([-1, seqLen, this.dModel]) as TF.Tensor3D;
       const scale = Math.sqrt(this.dModel);
       const scores = tf.matMul(q, k, false, true).div(scale);
       const weights = tf.softmax(scores, -1);

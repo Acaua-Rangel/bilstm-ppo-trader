@@ -106,4 +106,61 @@ export class TradeLedger {
   totalPnL(): number {
     return this.tradePnLs.reduce((a, b) => a + b, 0);
   }
+
+  /**
+   * Length of every run of consecutive wins. For [W,W,L,W,W,W,L,L] returns
+   * [2, 3] — the two win runs of length 2 and 3.
+   *
+   * Drives the streak-based sizing heuristic: a low average/median means
+   * losses are alternating with wins (martingale-like sizing wins),
+   * while a high max means the worst-case blast radius is large.
+   */
+  winStreakLengths(): number[] {
+    return this.streakLengths(p => p > 0);
+  }
+
+  lossStreakLengths(): number[] {
+    return this.streakLengths(p => p < 0);
+  }
+
+  averageWinStreak(): number { return this.mean(this.winStreakLengths()); }
+  averageLossStreak(): number { return this.mean(this.lossStreakLengths()); }
+  medianWinStreak(): number { return this.median(this.winStreakLengths()); }
+  medianLossStreak(): number { return this.median(this.lossStreakLengths()); }
+  maxWinStreak(): number { return this.max(this.winStreakLengths()); }
+  maxLossStreak(): number { return this.max(this.lossStreakLengths()); }
+
+  private streakLengths(predicate: (pnl: number) => boolean): number[] {
+    const lengths: number[] = [];
+    let current = 0;
+    for (const pnl of this.tradePnLs) {
+      if (predicate(pnl)) {
+        current++;
+      } else if (current > 0) {
+        lengths.push(current);
+        current = 0;
+      }
+    }
+    if (current > 0) lengths.push(current);
+    return lengths;
+  }
+
+  private mean(values: ReadonlyArray<number>): number {
+    if (values.length === 0) return 0;
+    return values.reduce((a, b) => a + b, 0) / values.length;
+  }
+
+  private median(values: ReadonlyArray<number>): number {
+    if (values.length === 0) return 0;
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 === 0
+      ? (sorted[mid - 1] + sorted[mid]) / 2
+      : sorted[mid];
+  }
+
+  private max(values: ReadonlyArray<number>): number {
+    if (values.length === 0) return 0;
+    return Math.max(...values);
+  }
 }

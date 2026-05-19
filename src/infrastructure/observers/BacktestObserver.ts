@@ -61,6 +61,7 @@ export class BacktestObserver implements SessionObserver {
     this.logger.info("=== BACKTEST REPORT ===");
     this.logger.info(`Directional accuracy (forecaster): ${(directionalAccuracy * 100).toFixed(2)}% (${this.directionalTotal} predictions)`);
     this.logExpectancyBlock();
+    this.logStreakBlock();
     this.logger.info(`Accumulated trade PnL: ${this.formatSigned(this.ledger.totalPnL())}`);
     this.logger.info(`Final equity: ${summary.finalEquity.toString()} (initial: ${this.initialEquity.toString()})`);
     this.logger.info(`Net session PnL: ${this.formatSigned(netDelta)} (${this.formatSignedPct(totalReturnPct)})`);
@@ -86,6 +87,29 @@ export class BacktestObserver implements SessionObserver {
     this.logger.info(`Win rate (closed trades): ${winRate.toFixed(2)}% (${wins}W / ${losses}L across ${trades} trades)`);
     this.logger.info(`Avg win: ${this.formatSigned(avgWin)} | Avg loss: ${this.formatSigned(avgLoss)} | R:R ratio: ${this.formatRatio(rrRatio)}`);
     this.logger.info(`Expectancy / trade: ${this.formatSigned(expectancy)} | Profit factor: ${this.formatRatio(profitFactor)}`);
+  }
+
+  /**
+   * Streak metrics validate the assumption behind the martingale-style
+   * StreakSizingMultiplier: if avg/median loss streak ≈ 1 and max ≤ 2,
+   * the heuristic is safe; if max grows beyond 3 the cap will be hit and
+   * the strategy bleeds on those runs.
+   */
+  private logStreakBlock(): void {
+    const winAvg = this.ledger.averageWinStreak();
+    const winMed = this.ledger.medianWinStreak();
+    const winMax = this.ledger.maxWinStreak();
+    const winRuns = this.ledger.winStreakLengths().length;
+    const lossAvg = this.ledger.averageLossStreak();
+    const lossMed = this.ledger.medianLossStreak();
+    const lossMax = this.ledger.maxLossStreak();
+    const lossRuns = this.ledger.lossStreakLengths().length;
+    this.logger.info(
+      `Win streaks: avg ${winAvg.toFixed(2)} | median ${winMed.toFixed(2)} | max ${winMax} (${winRuns} runs)`
+    );
+    this.logger.info(
+      `Loss streaks: avg ${lossAvg.toFixed(2)} | median ${lossMed.toFixed(2)} | max ${lossMax} (${lossRuns} runs)`
+    );
   }
 
   private trackDirectional(event: TickEvent): void {

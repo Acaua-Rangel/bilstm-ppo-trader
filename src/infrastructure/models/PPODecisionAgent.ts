@@ -9,8 +9,8 @@ import { TradingAction } from "../../domain/enums/TradingAction";
  * Implements the DecisionAgent port.
  */
 export class PPODecisionAgent implements DecisionAgent {
-  private policyNet!: TF.LayersModel;
-  private valueNet!: TF.LayersModel;
+  private policyNet!: TF.GraphModel;
+  private valueNet!: TF.GraphModel;
 
   async decide(state: ReadonlyArray<number>): Promise<AgentDecision> {
     const stateTensor = tf.tensor2d([Array.from(state)]);
@@ -38,7 +38,7 @@ export class PPODecisionAgent implements DecisionAgent {
   }
 
   async load(path: string): Promise<void> {
-    this.policyNet = await tf.loadLayersModel(`file://${path}/policy/model.json`);
-    this.valueNet = await tf.loadLayersModel(`file://${path}/value/model.json`);
+    this.policyNet = await tf.loadGraphModel(`file://${path}/policy/model.json`);
+    this.valueNet = await tf.loadGraphModel(`file://${path}/value/model.json`);
   }
 }

@@ -15,7 +15,8 @@ import { Logger } from "../../domain/ports/Logger";
 export class PaperExecutor implements TradeExecutor {
   private cash: Money;
   private holding: Quantity = Quantity.zero();
-  private readonly fee: number = 0.001;
+  // Zero fee for FDUSD promotional pairs on Binance
+  private readonly fee: number = 0.000;
   private readonly slippagePct: number;
 
   constructor(initialCash: Money, slippagePct: number, private readonly logger: Logger) {

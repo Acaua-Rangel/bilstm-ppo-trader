@@ -24,9 +24,10 @@ export class BiLSTMForecaster implements ForecastModel {
       [1, features.windowSize(), features.featuresPerStep()]
     );
     // The BiLSTM graph contains LSTM dynamic ops (while-loop Exit nodes);
-    // executeAsync with a named input map handles them correctly.
+    // executeAsync with a direct tensor automatically maps to the sole input node,
+    // avoiding hardcoded names like 'input_layer_4' which change per Kaggle session.
     const raw = await this.model.executeAsync(
-      { input_layer_4: inputTensor }, 'Identity'
+      inputTensor, 'Identity'
     ) as TF.Tensor | TF.Tensor[];
     const output = Array.isArray(raw) ? raw[0] : raw;
     const result = Array.from(await output.data());

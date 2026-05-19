@@ -88,7 +88,7 @@ export class BinanceLiveExecutor implements TradeExecutor {
 
   async fetchCashBalance(): Promise<Money> {
     const balance = await this.retry.execute("fetchBalance", () => this.exchange.fetchBalance());
-    const usdt = balance.USDT?.free ?? 0;
+    const usdt = balance.FDUSD?.free ?? 0;
     return Money.of(usdt);
   }
 

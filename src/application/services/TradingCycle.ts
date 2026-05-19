@@ -43,7 +43,7 @@ export class TradingCycle {
   constructor(
     private readonly dependencies: TradingCycleDependencies,
     private readonly configuration: TradingCycleConfig
-  ) {}
+  ) { }
 
   async executeOnce(): Promise<CycleResult> {
     const series = await this.dependencies.marketData.fetchRecentCandles(

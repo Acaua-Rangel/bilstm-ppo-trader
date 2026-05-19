@@ -9,8 +9,12 @@ import { EMA, RSI, MACD, BollingerBands } from "technicalindicators";
 export class FeatureBuilder {
   private readonly windowSize: number;
 
-  constructor(windowSize: number = 64) {
+  constructor(windowSize: number = 128) {
     this.windowSize = windowSize;
+  }
+
+  getWindowSize(): number {
+    return this.windowSize;
   }
 
   build(series: CandleSeries): FeatureMatrix {

@@ -30,10 +30,13 @@ export class CalibrationWarmup {
     const { series, forecaster, featureBuilder, calibrator, logger, samples } = input;
     const size = series.size();
     const lastIndex = size - 2; // need t+1 for actual return
-    const firstIndex = Math.max(MIN_INDICATOR_WARMUP, lastIndex - samples + 1);
+    // Window must contain at least featureBuilder.getWindowSize() candles —
+    // otherwise FeatureMatrix is smaller than the model's input shape.
+    const minWarmup = Math.max(MIN_INDICATOR_WARMUP, featureBuilder.getWindowSize() - 1);
+    const firstIndex = Math.max(minWarmup, lastIndex - samples + 1);
     if (firstIndex > lastIndex) {
       logger.warn("CalibrationWarmup skipped: insufficient candles", {
-        size, samples, minRequired: MIN_INDICATOR_WARMUP + samples + 1,
+        size, samples, minRequired: minWarmup + samples + 1,
       });
       return;
     }

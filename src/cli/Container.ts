@@ -58,7 +58,7 @@ export class Container {
     this.initialCapital = Money.of(env.initialCapitalUsd);
     this.logger = new ConsoleLogger();
     this.marketData = new BinanceMarketData(env.timeframe);
-    this.featureBuilder = new FeatureBuilder(64);
+    this.featureBuilder = new FeatureBuilder(128);
     this.forecaster = new BiLSTMForecaster();
     this.agent = new PPODecisionAgent();
     this.risk = new ConservativeRiskPolicy(this.riskConfig());

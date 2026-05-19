@@ -24,7 +24,7 @@ const VOLATILITY_WINDOW = 20;
 const ENSEMBLE_RUNS = 10;
 const MIN_CONFIDENCE = 0.75;
 const MIN_CALIBRATED_PROBABILITY = 0.52;
-const BASE_SIGNAL_THRESHOLD = 0.0003;
+const BASE_SIGNAL_THRESHOLD = 0.00003;
 
 /**
  * Service: a single decision-and-execution cycle.

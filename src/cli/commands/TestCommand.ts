@@ -20,7 +20,7 @@ export class TestCommand implements Command {
   private static readonly HISTORICAL_CANDLES = 1000;
   private static readonly CALIBRATION_CANDLES = 200;
   private static readonly CALIBRATION_SAMPLES = 100;
-  private static readonly WINDOW_SIZE = 64;
+  private static readonly WINDOW_SIZE = 128;
 
   constructor(private readonly container: Container) {}
 

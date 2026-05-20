@@ -25,6 +25,14 @@ const ENSEMBLE_RUNS = 10;
 const MIN_CONFIDENCE = 0.75;
 const MIN_CALIBRATED_PROBABILITY = 0.52;
 const BASE_SIGNAL_THRESHOLD = 0.00003;
+/**
+ * Index into the BiLSTM HORIZON-length output used as the trading signal.
+ * Empirical result from the 5m backtest: forecast[0] (49.5% directional)
+ * marginally beat forecast[3] (47.4%) — longer horizons did not aggregate
+ * more signal. The CalibrationWarmup and BacktestObserver MUST use the
+ * same index — keep them in sync.
+ */
+export const SIGNAL_HORIZON_INDEX = 0;
 
 /**
  * Service: a single decision-and-execution cycle.
@@ -94,13 +102,14 @@ export class TradingCycle {
   ): string | null {
     if (!this.dependencies.regimeFilter.isTrending(series)) return "regime filter (sideways market)";
     const threshold = this.dependencies.adaptiveThreshold.compute(series, BASE_SIGNAL_THRESHOLD);
-    if (Math.abs(ensemble.mean[0]) < threshold) return `adaptive threshold (signal ${ensemble.mean[0].toFixed(5)} < ${threshold.toFixed(5)})`;
-    if ((ensemble.confidence[0] ?? 0) < MIN_CONFIDENCE) return `ensemble confidence (${(ensemble.confidence[0] ?? 0).toFixed(2)} < ${MIN_CONFIDENCE})`;
+    const signal = ensemble.mean[SIGNAL_HORIZON_INDEX] ?? 0;
+    if (Math.abs(signal) < threshold) return `adaptive threshold (signal ${signal.toFixed(5)} < ${threshold.toFixed(5)})`;
+    if ((ensemble.confidence[SIGNAL_HORIZON_INDEX] ?? 0) < MIN_CONFIDENCE) return `ensemble confidence (${(ensemble.confidence[SIGNAL_HORIZON_INDEX] ?? 0).toFixed(2)} < ${MIN_CONFIDENCE})`;
     // Platt gate is only meaningful after fitting; before that, slope=1/intercept=0
     // makes σ(forecast) ≈ 0.5 and would block every trade. CalibrationWarmup fits
     // the calibrator before the session starts; if it has not run, this gate is bypassed.
     if (this.dependencies.calibrator.isCalibrated()) {
-      const calibrated = this.dependencies.calibrator.calibratedProbability(ensemble.mean[0]);
+      const calibrated = this.dependencies.calibrator.calibratedProbability(signal);
       if (calibrated < MIN_CALIBRATED_PROBABILITY) return `Platt probability (${calibrated.toFixed(2)} < ${MIN_CALIBRATED_PROBABILITY})`;
     }
     return null;

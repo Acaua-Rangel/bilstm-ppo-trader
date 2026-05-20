@@ -9,9 +9,11 @@ import { Money } from "../../domain/value-objects/Money";
 import { PlaybackCursor } from "../clock/PlaybackCursor";
 import { CandleSeries } from "../../domain/collections/CandleSeries";
 import { TradeLedger } from "../../domain/collections/TradeLedger";
+import { SIGNAL_HORIZON_INDEX } from "../../application/services/TradingCycle";
 
 const TARGET_MIN_RATE = 0.52;
 const TARGET_MAX_RATE = 0.75;
+const ACTUAL_HORIZON_BARS = SIGNAL_HORIZON_INDEX + 1;
 
 /**
  * Adapter: aggregates per-tick events into a backtest report.
@@ -114,12 +116,12 @@ export class BacktestObserver implements SessionObserver {
 
   private trackDirectional(event: TickEvent): void {
     const idx = this.cursor.current();
-    if (idx + 1 >= this.fullSeries.size()) return;
+    if (idx + ACTUAL_HORIZON_BARS >= this.fullSeries.size()) return;
     const currentClose = this.fullSeries.at(idx).closePrice().toNumber();
-    const nextClose = this.fullSeries.at(idx + 1).closePrice().toNumber();
-    const actualReturn = nextClose - currentClose;
+    const futureClose = this.fullSeries.at(idx + ACTUAL_HORIZON_BARS).closePrice().toNumber();
+    const actualReturn = futureClose - currentClose;
     if (actualReturn === 0) return;
-    const predicted = event.forecast[0] ?? 0;
+    const predicted = event.forecast[SIGNAL_HORIZON_INDEX] ?? 0;
     if (Math.sign(predicted) === Math.sign(actualReturn)) this.directionalHits++;
     this.directionalTotal++;
   }

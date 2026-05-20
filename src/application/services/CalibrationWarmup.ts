@@ -3,8 +3,12 @@ import { ForecastModel } from "../../domain/ports/ForecastModel";
 import { Logger } from "../../domain/ports/Logger";
 import { FeatureBuilder } from "./FeatureBuilder";
 import { PlattCalibrator } from "./PlattCalibrator";
+import { SIGNAL_HORIZON_INDEX } from "./TradingCycle";
 
 const MIN_INDICATOR_WARMUP = 100;
+// Predictions at index N are cumulative returns N+1 bars ahead — calibrator
+// must compare against the matching cumulative actual.
+const ACTUAL_HORIZON_BARS = SIGNAL_HORIZON_INDEX + 1;
 
 /**
  * Service: one-shot warm-up before a trading session.
@@ -29,14 +33,14 @@ export class CalibrationWarmup {
   async run(input: WarmupInput): Promise<void> {
     const { series, forecaster, featureBuilder, calibrator, logger, samples } = input;
     const size = series.size();
-    const lastIndex = size - 2; // need t+1 for actual return
+    const lastIndex = size - 1 - ACTUAL_HORIZON_BARS; // need t+ACTUAL_HORIZON_BARS for actual return
     // Window must contain at least featureBuilder.getWindowSize() candles —
     // otherwise FeatureMatrix is smaller than the model's input shape.
     const minWarmup = Math.max(MIN_INDICATOR_WARMUP, featureBuilder.getWindowSize() - 1);
     const firstIndex = Math.max(minWarmup, lastIndex - samples + 1);
     if (firstIndex > lastIndex) {
       logger.warn("CalibrationWarmup skipped: insufficient candles", {
-        size, samples, minRequired: minWarmup + samples + 1,
+        size, samples, minRequired: minWarmup + samples + ACTUAL_HORIZON_BARS,
       });
       return;
     }
@@ -47,9 +51,9 @@ export class CalibrationWarmup {
       const features = featureBuilder.build(window);
       const forecast = await forecaster.predict(features);
       const currentClose = series.at(t).closePrice().toNumber();
-      const nextClose = series.at(t + 1).closePrice().toNumber();
-      predictions.push(forecast[0]);
-      actuals.push((nextClose - currentClose) / currentClose);
+      const futureClose = series.at(t + ACTUAL_HORIZON_BARS).closePrice().toNumber();
+      predictions.push(forecast[SIGNAL_HORIZON_INDEX]);
+      actuals.push((futureClose - currentClose) / currentClose);
     }
     this.logSanityCheck(predictions, actuals, logger);
     calibrator.calibrate(predictions, actuals);

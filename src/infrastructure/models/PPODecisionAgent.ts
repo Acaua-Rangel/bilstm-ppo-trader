@@ -19,7 +19,7 @@ export class PPODecisionAgent implements DecisionAgent {
     const probsArray = Array.from(probs.dataSync());
     const estimatedValue = value.dataSync()[0];
     tf.dispose([stateTensor, probs, value]);
-    const actionCode = this.sampleAction(probsArray);
+    const actionCode = this.getGreedyAction(probsArray);
     return {
       action: TradingAction.fromCode(actionCode),
       logProbability: Math.log(probsArray[actionCode] + 1e-8),
@@ -27,14 +27,16 @@ export class PPODecisionAgent implements DecisionAgent {
     };
   }
 
-  private sampleAction(probabilities: number[]): number {
-    const random = Math.random();
-    let cumulative = 0;
+  private getGreedyAction(probabilities: number[]): number {
+    let bestAction = 0;
+    let maxProb = -1;
     for (let i = 0; i < probabilities.length; i++) {
-      cumulative += probabilities[i];
-      if (random < cumulative) return i;
+      if (probabilities[i] > maxProb) {
+        maxProb = probabilities[i];
+        bestAction = i;
+      }
     }
-    return probabilities.length - 1;
+    return bestAction;
   }
 
   async load(path: string): Promise<void> {

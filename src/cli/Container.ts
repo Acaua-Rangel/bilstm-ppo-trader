@@ -14,10 +14,8 @@ import { LiveLogObserver } from "../infrastructure/observers/LiveLogObserver";
 import { BacktestObserver } from "../infrastructure/observers/BacktestObserver";
 import { FeatureBuilder } from "../application/services/FeatureBuilder";
 import { TradingCycle } from "../application/services/TradingCycle";
-import { RegimeFilter } from "../application/services/RegimeFilter";
-import { PlattCalibrator } from "../application/services/PlattCalibrator";
-import { AdaptiveThreshold } from "../application/services/AdaptiveThreshold";
-import { CalibrationWarmup } from "../application/services/CalibrationWarmup";
+import { ForecastSanityCheck } from "../application/services/ForecastSanityCheck";
+import { RuntimeStateStore } from "../infrastructure/storage/RuntimeStateStore";
 import { CandleSeries } from "../domain/collections/CandleSeries";
 import { TradingSymbol } from "../domain/value-objects/TradingSymbol";
 import { Money } from "../domain/value-objects/Money";
@@ -44,9 +42,7 @@ export class Container {
   readonly risk: ConservativeRiskPolicy;
   readonly storage: FileModelStorage;
   readonly featureBuilder: FeatureBuilder;
-  readonly regimeFilter: RegimeFilter;
-  readonly calibrator: PlattCalibrator;
-  readonly adaptiveThreshold: AdaptiveThreshold;
+  readonly stateStore: RuntimeStateStore;
   readonly symbol: TradingSymbol;
   readonly initialCapital: Money;
 
@@ -63,9 +59,7 @@ export class Container {
     this.agent = new PPODecisionAgent();
     this.risk = new ConservativeRiskPolicy(this.riskConfig());
     this.storage = new FileModelStorage(this.forecaster, this.agent);
-    this.regimeFilter = new RegimeFilter();
-    this.calibrator = new PlattCalibrator();
-    this.adaptiveThreshold = new AdaptiveThreshold();
+    this.stateStore = new RuntimeStateStore(env.stateFilePath, this.logger);
   }
 
   // --- Live (INVEST) wiring ----------------------------------------------
@@ -116,13 +110,13 @@ export class Container {
     return { marketData, clock, observer, cursor, calibrationSeries };
   }
 
-  // --- Calibration warm-up ------------------------------------------------
+  // --- Forecaster sanity check (pre-session diagnostic) -------------------
 
-  buildCalibrationWarmup(): CalibrationWarmup {
-    return new CalibrationWarmup();
+  buildForecastSanityCheck(): ForecastSanityCheck {
+    return new ForecastSanityCheck();
   }
 
-  async fetchCalibrationSeries(candles: number): Promise<CandleSeries> {
+  async fetchSanityCheckSeries(candles: number): Promise<CandleSeries> {
     return await this.marketData.fetchRecentCandles(this.symbol, candles, 0);
   }
 
@@ -134,9 +128,7 @@ export class Container {
       executor, forecastModel: this.forecaster,
       agent: this.agent, risk: this.risk,
       logger: this.logger, featureBuilder: this.featureBuilder,
-      regimeFilter: this.regimeFilter,
-      calibrator: this.calibrator,
-      adaptiveThreshold: this.adaptiveThreshold,
+      stateStore: this.stateStore,
     }, {
       symbol: this.symbol,
       stopLossPct: this.env.stopLossPct,
@@ -150,6 +142,7 @@ export class Container {
       stopLossPct: this.env.stopLossPct,
       takeProfitPct: this.env.takeProfitPct,
       maxDrawdownPct: this.env.maxDailyDrawdownPct,
+      slippagePct: this.env.slippagePct,
     };
   }
 }
@@ -159,7 +152,7 @@ export interface ReplaySetup {
   clock: Clock;
   observer: SessionObserver;
   cursor: PlaybackCursor;
-  /** Candles that precede the backtest range — used to fit the calibrator. */
+  /** Candles that precede the backtest range — used by the forecaster sanity check. */
   calibrationSeries: CandleSeries;
 }
 
@@ -175,4 +168,5 @@ export interface Environment {
   binanceApiKey: string;
   binanceApiSecret: string;
   binanceTestnet: boolean;
+  stateFilePath: string;
 }

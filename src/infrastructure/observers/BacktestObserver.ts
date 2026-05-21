@@ -121,8 +121,11 @@ export class BacktestObserver implements SessionObserver {
     const futureClose = this.fullSeries.at(idx + ACTUAL_HORIZON_BARS).closePrice().toNumber();
     const actualReturn = futureClose - currentClose;
     if (actualReturn === 0) return;
-    const predicted = event.forecast[SIGNAL_HORIZON_INDEX] ?? 0;
-    if (Math.sign(predicted) === Math.sign(actualReturn)) this.directionalHits++;
+    // CLASSIFICATION: forecast is P(up) ∈ [0,1]; predicts UP iff > 0.5.
+    const predicted = event.forecast[SIGNAL_HORIZON_INDEX] ?? 0.5;
+    const predictedUp = predicted > 0.5;
+    const actualUp = actualReturn > 0;
+    if (predictedUp === actualUp) this.directionalHits++;
     this.directionalTotal++;
   }
 

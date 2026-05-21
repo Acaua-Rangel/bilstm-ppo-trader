@@ -12,15 +12,15 @@ import { TradingSessionUseCase } from "../../application/use-cases/TradingSessio
  *   - SystemClock (real wall-clock)
  *   - LiveLogObserver (streams events to the logger)
  *
- * The Platt calibrator is re-fitted on every restart against the most
- * recent `CALIBRATION_CANDLES` candles fetched from the exchange. Kept
- * in memory only — no persistence across restarts.
+ * Runtime state (entry price, bars-in-position) is persisted via
+ * RuntimeStateStore so a restart inside an open position resumes with
+ * the correct SL/TP anchors.
  */
 export class InvestCommand implements Command {
   private static readonly INTERVAL_MS = 60 * 60 * 1000;
   private static readonly RETRY_DELAY_MS = 30_000;
-  private static readonly CALIBRATION_CANDLES = 400;
-  private static readonly CALIBRATION_SAMPLES = 100;
+  private static readonly SANITY_CANDLES = 400;
+  private static readonly SANITY_SAMPLES = 100;
 
   constructor(private readonly container: Container) {}
 
@@ -30,16 +30,15 @@ export class InvestCommand implements Command {
     const marketData = this.container.marketDataProvider();
     await this.container.storage.loadForecastModel("./models/bilstm");
     await this.container.storage.loadAgent("./models/ppo");
-    const calibrationSeries = await this.container.fetchCalibrationSeries(
-      InvestCommand.CALIBRATION_CANDLES
+    const sanitySeries = await this.container.fetchSanityCheckSeries(
+      InvestCommand.SANITY_CANDLES
     );
-    await this.container.buildCalibrationWarmup().run({
-      series: calibrationSeries,
+    await this.container.buildForecastSanityCheck().run({
+      series: sanitySeries,
       forecaster: this.container.forecaster,
       featureBuilder: this.container.featureBuilder,
-      calibrator: this.container.calibrator,
       logger: this.container.logger,
-      samples: InvestCommand.CALIBRATION_SAMPLES,
+      samples: InvestCommand.SANITY_SAMPLES,
     });
     const cycle = this.container.buildTradingCycle(executor, marketData);
     const useCase = new TradingSessionUseCase({

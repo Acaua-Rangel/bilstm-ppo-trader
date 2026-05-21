@@ -17,16 +17,36 @@ export class ConservativeRiskPolicy implements RiskPolicy {
   private readonly stopLossPct: Percentage;
   private readonly takeProfitPct: Percentage;
   private readonly maxDrawdownPct: Percentage;
+  private readonly slippagePct: number;
 
   constructor(config: RiskConfig) {
     this.maxPositionRiskPct = Percentage.of(config.maxPositionRiskPct);
     this.stopLossPct = Percentage.of(config.stopLossPct);
     this.takeProfitPct = Percentage.of(config.takeProfitPct);
     this.maxDrawdownPct = Percentage.of(config.maxDrawdownPct);
+    this.slippagePct = config.slippagePct;
   }
 
+  /**
+   * Risk-based sizing: dollars deployed are capped so the worst-case
+   * stop-loss hit does not exceed `maxPositionRiskPct` of the equity.
+   *
+   *   riskBudget = cash * maxPositionRiskPct
+   *   positionAtRisk = positionSize * stopLossPct
+   *   ⇒ positionSize = riskBudget / stopLossPct = cash * (riskPct / slPct)
+   *
+   * For tight stops (e.g. risk=2%, sl=0.30% ⇒ multiplier 6.67×) the
+   * formula exceeds 100% of cash; we cap it at the affordable amount
+   * (cash net of slippage) so the executor will accept the order.
+   *
+   * This matches the training environment, where the PPO learned to
+   * operate with the entire equity deployed as a single position.
+   */
   positionSizeFor(availableCash: Money): Money {
-    return availableCash.multiply(this.maxPositionRiskPct.toNumber());
+    const cash = availableCash.toNumber();
+    const affordable = cash / (1 + this.slippagePct);
+    const riskBased = cash * (this.maxPositionRiskPct.toNumber() / this.stopLossPct.toNumber());
+    return Money.of(Math.min(affordable, riskBased));
   }
 
   shouldStopOut(position: Position, currentPrice: Price): boolean {
@@ -62,4 +82,5 @@ export interface RiskConfig {
   stopLossPct: number;
   takeProfitPct: number;
   maxDrawdownPct: number;
+  slippagePct: number;
 }

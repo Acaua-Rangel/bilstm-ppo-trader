@@ -26,6 +26,7 @@ function loadEnvironment(): Environment {
     binanceApiKey: process.env.BINANCE_API_KEY ?? "",
     binanceApiSecret: process.env.BINANCE_API_SECRET ?? "",
     binanceTestnet: process.env.BINANCE_TESTNET === "true",
+    stateFilePath: process.env.STATE_FILE_PATH ?? ".runtime/trading-state.json",
   };
 }
 

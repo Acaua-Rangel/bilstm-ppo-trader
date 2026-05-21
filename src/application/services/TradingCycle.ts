@@ -5,9 +5,7 @@ import { DecisionAgent } from "../../domain/ports/DecisionAgent";
 import { RiskPolicy } from "../../domain/ports/RiskPolicy";
 import { Logger } from "../../domain/ports/Logger";
 import { FeatureBuilder } from "./FeatureBuilder";
-import { RegimeFilter } from "./RegimeFilter";
-import { PlattCalibrator } from "./PlattCalibrator";
-import { AdaptiveThreshold } from "./AdaptiveThreshold";
+import { RuntimeStateStore } from "../../infrastructure/storage/RuntimeStateStore";
 import { CandleSeries } from "../../domain/collections/CandleSeries";
 import { TradingSymbol } from "../../domain/value-objects/TradingSymbol";
 import { TradingAction } from "../../domain/enums/TradingAction";
@@ -17,31 +15,22 @@ import { Price } from "../../domain/value-objects/Price";
 import { Money } from "../../domain/value-objects/Money";
 
 const VOLATILITY_WINDOW = 20;
-// Tuned against the observed forecaster output range (~5e-4):
-//   - BASE_SIGNAL_THRESHOLD was 0.002, blocking 100% of trades.
-//   - MIN_CALIBRATED_PROBABILITY was 0.65, impossible with default identity-sigmoid.
-//   - ENSEMBLE_RUNS halved to cut inference cost without measurable quality loss.
-const ENSEMBLE_RUNS = 10;
-const MIN_CONFIDENCE = 0.75;
-const MIN_CALIBRATED_PROBABILITY = 0.52;
-const BASE_SIGNAL_THRESHOLD = 0.00003;
 /**
  * Index into the BiLSTM HORIZON-length output used as the trading signal.
- * Empirical result from the 5m backtest: forecast[0] (49.5% directional)
- * marginally beat forecast[3] (47.4%) — longer horizons did not aggregate
- * more signal. The CalibrationWarmup and BacktestObserver MUST use the
- * same index — keep them in sync.
+ * 0 = P(up next bar). ForecastSanityCheck and BacktestObserver MUST use
+ * the same index — keep them in sync.
  */
 export const SIGNAL_HORIZON_INDEX = 0;
 
 /**
  * Service: a single decision-and-execution cycle.
- * SRP: orchestrates one trading tick. Unaware of exchange or model details.
  *
- * Keeps minimal in-memory state (entryPrice, barsInPosition) so the state
- * vector matches the training environment. State is lost on restart and
- * recovers naturally on the next entry — stop-out detection during the
- * gap window is sacrificed for simplicity.
+ * Mirrors the training environment as closely as possible:
+ *   - 16-feature window fed to the BiLSTM forecaster.
+ *   - 13-element state vector fed to the PPO actor.
+ *   - Stop-loss / take-profit are hard guards (also in training).
+ *   - No regime/probability/confidence gates — the PPO learned to manage
+ *     entries on its own via the reward shape (pred_strength term).
  */
 export class TradingCycle {
   private entryPrice: number = 0;
@@ -51,68 +40,34 @@ export class TradingCycle {
   constructor(
     private readonly dependencies: TradingCycleDependencies,
     private readonly configuration: TradingCycleConfig
-  ) { }
+  ) {
+    const restored = this.dependencies.stateStore.load();
+    if (restored !== null) {
+      this.entryPrice = restored.entryPrice;
+      this.barsInPosition = restored.barsInPosition;
+      this.lastSeenPosition = restored.lastSeenPosition;
+      this.dependencies.logger.info("Runtime state restored", {
+        entryPrice: restored.entryPrice,
+        barsInPosition: restored.barsInPosition,
+        lastSeenPosition: restored.lastSeenPosition,
+      });
+    }
+  }
 
   async executeOnce(): Promise<CycleResult> {
     const series = await this.dependencies.marketData.fetchRecentCandles(
       this.configuration.symbol, 200, 0
     );
     const features = this.dependencies.featureBuilder.build(series);
-    const ensemble = await this.dependencies.forecastModel.predictWithUncertainty(
-      features, ENSEMBLE_RUNS
-    );
-    const forecast = ensemble.mean;
+    const forecast = await this.dependencies.forecastModel.predict(features);
     const currentPrice = series.last().closePrice();
     const position = await this.detectPosition(currentPrice.toNumber());
     const stateFeatures = this.buildStateVector(series, forecast, position, currentPrice.toNumber());
     const decision = await this.dependencies.agent.decide(stateFeatures);
 
     const candidate = this.applyExitGuards(decision.action, position, currentPrice.toNumber());
-    const filtered = this.applyAccuracyFilters(candidate, series, ensemble);
-    const execution = await this.executeDecision(filtered, currentPrice, position);
+    const execution = await this.executeDecision(candidate, currentPrice, position);
     return { ...execution, forecast };
-  }
-
-  /**
-   * Layered filters that downgrade an action to HOLD when accuracy gates fail.
-   * SELL on an open position is exempt: closing must remain unconditional so
-   * that stop-loss and risk-off exits cannot be vetoed by low confidence.
-   *
-   * Stages:
-   *   1. Regime filter — only act in trending markets (ADX + volume confirm).
-   *   2. Adaptive threshold — require |mean[0]| > base × (recent ATR / slow ATR).
-   *   3. Ensemble confidence — variance-derived confidence must beat the gate.
-   *   4. Platt-calibrated probability — must beat the gate too.
-   */
-  private applyAccuracyFilters(
-    action: TradingAction,
-    series: CandleSeries,
-    ensemble: { mean: ReadonlyArray<number>; confidence: ReadonlyArray<number> }
-  ): TradingAction {
-    if (!action.isBuy()) return action;
-    const reason = this.firstBlockingFilter(series, ensemble);
-    if (reason === null) return action;
-    this.dependencies.logger.info(`Trade gated by ${reason} — forcing HOLD`);
-    return TradingAction.HOLD;
-  }
-
-  private firstBlockingFilter(
-    series: CandleSeries,
-    ensemble: { mean: ReadonlyArray<number>; confidence: ReadonlyArray<number> }
-  ): string | null {
-    if (!this.dependencies.regimeFilter.isTrending(series)) return "regime filter (sideways market)";
-    const threshold = this.dependencies.adaptiveThreshold.compute(series, BASE_SIGNAL_THRESHOLD);
-    const signal = ensemble.mean[SIGNAL_HORIZON_INDEX] ?? 0;
-    if (Math.abs(signal) < threshold) return `adaptive threshold (signal ${signal.toFixed(5)} < ${threshold.toFixed(5)})`;
-    if ((ensemble.confidence[SIGNAL_HORIZON_INDEX] ?? 0) < MIN_CONFIDENCE) return `ensemble confidence (${(ensemble.confidence[SIGNAL_HORIZON_INDEX] ?? 0).toFixed(2)} < ${MIN_CONFIDENCE})`;
-    // Platt gate is only meaningful after fitting; before that, slope=1/intercept=0
-    // makes σ(forecast) ≈ 0.5 and would block every trade. CalibrationWarmup fits
-    // the calibrator before the session starts; if it has not run, this gate is bypassed.
-    if (this.dependencies.calibrator.isCalibrated()) {
-      const calibrated = this.dependencies.calibrator.calibratedProbability(signal);
-      if (calibrated < MIN_CALIBRATED_PROBABILITY) return `Platt probability (${calibrated.toFixed(2)} < ${MIN_CALIBRATED_PROBABILITY})`;
-    }
-    return null;
   }
 
   private async detectPosition(currentPrice: number): Promise<number> {
@@ -121,8 +76,20 @@ export class TradingCycle {
     );
     const position = holding.isPositive() ? 1 : 0;
     if (position === 1 && this.lastSeenPosition === 0) {
-      this.entryPrice = currentPrice;
-      this.barsInPosition = 0;
+      // Edge: 0→1 in this cycle (genuine new entry) OR restart with orphan holding
+      // (state file missing). The state-store load in the constructor would have
+      // restored a valid entryPrice; if it's still 0 here we're in the orphan case.
+      if (this.entryPrice === 0) {
+        this.entryPrice = currentPrice;
+        this.barsInPosition = 0;
+        this.dependencies.logger.warn(
+          "Orphan position detected on startup (holding > 0, no prior state) — " +
+          `using current price ${currentPrice} as entry anchor. SL/TP will be ` +
+          "computed relative to the restart price, not the real fill."
+        );
+      } else {
+        this.barsInPosition++;
+      }
     } else if (position === 0 && this.lastSeenPosition === 1) {
       this.entryPrice = 0;
       this.barsInPosition = 0;
@@ -130,13 +97,17 @@ export class TradingCycle {
       this.barsInPosition++;
     }
     this.lastSeenPosition = position;
+    this.dependencies.stateStore.save({
+      entryPrice: this.entryPrice,
+      barsInPosition: this.barsInPosition,
+      lastSeenPosition: this.lastSeenPosition,
+    });
     return position;
   }
 
   /**
-   * Hard exits — applied before the accuracy filters and before any agent
-   * vote can suppress a SELL. Symmetric stop-loss and take-profit cap the
-   * realized W:L the PPO can produce on its own.
+   * Hard exits — mirror the `apply_exit_guards` in the training notebook:
+   * a SELL is forced whenever PnL crosses ±SL/TP, regardless of the agent.
    */
   private applyExitGuards(action: TradingAction, position: number, currentPrice: number): TradingAction {
     if (position !== 1 || this.entryPrice === 0) return action;
@@ -249,9 +220,7 @@ export interface TradingCycleDependencies {
   risk: RiskPolicy;
   logger: Logger;
   featureBuilder: FeatureBuilder;
-  regimeFilter: RegimeFilter;
-  calibrator: PlattCalibrator;
-  adaptiveThreshold: AdaptiveThreshold;
+  stateStore: RuntimeStateStore;
 }
 
 export interface TradingCycleConfig {

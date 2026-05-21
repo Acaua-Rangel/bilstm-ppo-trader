@@ -1,10 +1,12 @@
 {
+  "claude.model": "claude-opus-4-6",
   "permissions": {
     "allow": [
       "Bash(npx tsc *)",
       "Bash(node -e ' *)",
       "Bash(python3 -c ' *)",
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(python scripts/update_notebook.py)"
     ]
   }
 }

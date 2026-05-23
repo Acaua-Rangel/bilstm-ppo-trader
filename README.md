@@ -1,10 +1,10 @@
 # AI Trading Bot
 
-Trading bot with **BiLSTM + Self-Attention** (forecast) + **PPO** (decision), built in TypeScript.
+A TypeScript trading bot driven by a two-stage model: a **CNN → BiLSTM → Multi-Head Attention** forecaster predicting next-bar direction, and a **PPO** reinforcement-learning agent deciding when to enter and exit. Training runs in Jupyter notebooks (Kaggle or Colab — your choice); the TypeScript runtime only loads the converted models for backtesting and live trading.
 
-Forecaster is pre-trained from scratch on a 4-asset multi-symbol dataset (BTC + ETH + SOL + BNB) for ~200k labeled samples; the PPO agent specializes on the primary symbol (BTC by default).
+---
 
-## Architecture
+## Project structure
 
 **Hexagonal Architecture (Ports & Adapters) + Clean Architecture**
 
@@ -19,248 +19,264 @@ src/
 │   └── errors/                DomainError hierarchy
 │
 ├── application/               Use cases (orchestration)
-│   ├── services/              FeatureBuilder, TradingCycle
-│   └── use-cases/             TrainModels, Backtest, Invest
+│   ├── services/              FeatureBuilder, TradingCycle, ForecastSanityCheck
+│   └── use-cases/             TradingSessionUseCase
 │
 ├── infrastructure/            ADAPTERS (implement ports)
-│   ├── market-data/           BinanceMarketData
+│   ├── market-data/           BinanceMarketData, HistoricalReplayMarketData
 │   ├── execution/             PaperExecutor, BinanceLiveExecutor
 │   ├── models/                BiLSTMForecaster, PPODecisionAgent
 │   ├── risk/                  ConservativeRiskPolicy
+│   ├── observers/             LiveLogObserver, BacktestObserver
 │   ├── logging/               ConsoleLogger
-│   └── storage/               FileModelStorage
+│   └── storage/               FileModelStorage, RuntimeStateStore
 │
 ├── cli/                       CLI interface
 │   ├── Container.ts           Composition Root (DI)
 │   ├── Cli.ts                 Dispatcher
-│   └── commands/              TrainCommand, TestCommand, InvestCommand
+│   └── commands/              TestCommand, InvestCommand
 │
 └── main.ts                    Entry point
+
+notebooks/                     Training pipeline (Kaggle / Colab)
+├── ai-spot-trading - Dataset.ipynb   Builds and publishes the dataset
+├── ai-spot-trading - Kaggle.ipynb    Training on Kaggle (2× T4, MirroredStrategy)
+├── ai-spot-trading - Colab.ipynb     Training on Colab (A100/T4, single GPU)
+└── README.md                          Notebook-specific instructions
 ```
 
-## Design principles
+---
 
-### SOLID
-- **Single Responsibility:** each class does one thing. `FeatureBuilder` only builds features. `RiskPolicy` only evaluates risk.
-- **Open/Closed:** new CLI modes = new entry in `Map<string, Command>`. No changes to `Cli.ts`.
-- **Liskov:** `PaperExecutor`, `BinanceLiveExecutor`, and future executors are interchangeable via `TradeExecutor`.
-- **Interface Segregation:** small, focused ports. `MarketDataProvider` only reads data, never executes.
-- **Dependency Inversion:** `application/` depends on ports (`domain/ports/`), never on TF.js or ccxt.
+## Model architecture
 
-### Object Calisthenics
-- **#3 Wrap primitives:** `Money`, `Price`, `Quantity`, `Percentage` — never a bare `number`.
-- **#4 First-class collections:** `CandleSeries`, `FeatureMatrix`.
-- **#5 One dot per line:** Tell don't ask — `position.unrealizedPnL(price)`, not `position.entryPrice / current * 100`.
-- **#6 No abbreviations:** `executionPrice` instead of `execPx`.
-- **#7 Small entities:** small classes, short methods.
-- **#8 Max 2 instance variables:** applied in value objects and `Portfolio` (cash + position).
-- **#9 No getters/setters:** behavior over exposure. `position.isOpen()`, not `position.quantity > 0`.
+The forecaster was built in two phases. Each phase was motivated by a specific weakness of the previous one.
 
-## The 3 modes
+### Phase 1 — BiLSTM baseline
 
-### 1. TRAIN — trains the models
+The starting point is a stacked **Bidirectional LSTM**. **LSTM** (Hochreiter & Schmidhuber, 1997, *Long Short-Term Memory*) is the canonical architecture for capturing long-range temporal dependencies in sequential data. The **bidirectional** variant (Schuster & Paliwal, 1997, *Bidirectional Recurrent Neural Networks*) lets each timestep be encoded with context from both past and future bars *within the input window* — useful during training because the loss landscape is smoother when the backward LSTM also informs the representation, even though only the forward pass is available at live-inference time.
 
-```bash
-npm run train
 ```
-
-Downloads 50000 historical candles per symbol from Binance for each of the 4 forecaster symbols (BTC, ETH, SOL, BNB), trains the **BiLSTM + Self-Attention** forecaster with supervised regression (predicting the next 4 returns) on the combined dataset (~200k samples), then trains the **PPO** agent for 50 episodes on the primary symbol only. **Never touches a real executor** — `TrainCommand` does not instantiate one.
-
-Forecaster architecture:
-```
-Input [B, 64, 10]
- → BiLSTM (return_sequences=True)        [B, 64, 128]
+Input  (batch, 128, 16)
+ → BiLSTM(128, return_sequences)         (batch, 128, 256)
  → Dropout
- → BiLSTM (return_sequences=True)        [B, 64, 64]
+ → BiLSTM(64, return_sequences)          (batch, 128, 128)
  → Dropout
- → Self-Attention (dModel=64)            [B, 64, 64]
- → GlobalAveragePooling1D                [B, 64]
- → Dense + LeakyReLU                     [B, 64]
- → Dense (horizon=4)                     [B, 4]
+ → GlobalAveragePooling1D
+ → Dense + LeakyReLU
+ → Dense (horizon=4, sigmoid)
 ```
 
-Training optimizations included:
-- L2 regularization on all LSTM kernels
-- Cosine annealing learning rate schedule
-- Early stopping on `val_loss` (patience 8)
-- Exponential LR decay for PPO across episodes
-- Global norm gradient clipping (`maxGradNorm = 0.5`)
-- O(n²) fix: bounded sliding window with 200-candle indicator warmup
-- Return clipping ±10% to remove flash crash outliers
-- Dynamic RL state: unrealized PnL, time in position, recent volatility
+The baseline tops out around random for next-bar direction: recurrence is good at long-range temporal structure but blind to the short, local candle patterns (3–7 bars) that often carry the actual edge.
 
-#### Checkpoints (resume training)
+### Phase 2 — adding CNN multi-scale + Multi-Head Attention
 
-Long runs can be checkpointed and resumed:
+Two layers were added to address two specific weaknesses of the baseline:
+
+**Conv1D multi-scale (kernels 3, 5, 7).** Short, local candle patterns (doji, engulfing, hammer) span 3–7 bars and are exactly what an LSTM is poor at extracting from raw features. Three parallel `Conv1D` branches with different kernel sizes learn pattern detectors at multiple temporal scales, then concatenate. The hybrid CNN + recurrent pattern is the standard recipe from time-series work — see Bai, Kolter & Koltun, 2018, *An Empirical Evaluation of Generic Convolutional and Recurrent Networks for Sequence Modeling*, and Fawaz et al., 2019, *Deep Learning for Time Series Classification: a review*. A `MaxPool1D(2)` halves the temporal axis, giving the downstream BiLSTM a cheaper input without losing relevant content.
+
+**Multi-Head Self-Attention.** Even after the BiLSTM produces a rich per-timestep representation, the classification head still has to weight which timesteps in the window matter most for *this* prediction. **MHA** (Vaswani et al., 2017, *Attention Is All You Need*) performs this weighting with several heads in parallel — different heads can specialize in different temporal patterns (trend, mean-reversion, breakout, consolidation). For multi-horizon time-series forecasting specifically, this matches the design pattern in *Temporal Fusion Transformers* (Lim et al., 2021).
+
+The final stack:
+
+```
+Input  (batch, 128, 16)
+ ├─ Conv1D(32, k=3) ─┐
+ ├─ Conv1D(32, k=5) ─┼─→ Concat → MaxPool(2) → Dropout    (batch, 64, 96)
+ └─ Conv1D(32, k=7) ─┘
+ → BiLSTM(128, return_sequences)                          (batch, 64, 256)
+ → Dropout
+ → BiLSTM(64, return_sequences)                           (batch, 64, 128)
+ → Dropout
+ → MultiHeadAttention(heads=4) + Residual + LayerNorm     (batch, 64, 128)
+ → GlobalAveragePooling1D                                 (batch, 128)
+ → Dense + LeakyReLU
+ → Dense (horizon=4, sigmoid)                             (batch, 4)
+```
+
+Output is `P(up)` for each of the next 4 bars. Inference uses horizon 0 as the directional signal feeding the PPO state.
+
+### PPO decision agent
+
+The trading decision is a Proximal Policy Optimization actor-critic (Schulman et al., 2017, *Proximal Policy Optimization Algorithms*):
+
+- **Actor:** 13-feature state → Dense(128, tanh) → Dense(64, tanh) → Dense(3, softmax) over `{HOLD, BUY, SELL}`.
+- **Critic:** same input → Dense(128, tanh) → Dense(64, tanh) → Dense(1) value estimate.
+
+The 13 state features mirror what the runtime can compute live: flat-flag, unrealized PnL, normalized bars-in-position, OHLC ratios, range/close, position indicator, recent volatility (20-bar std of returns), and the 4 forecaster probabilities. PPO is trained with a vectorized GPU simulator running 512 parallel episodes over the historical period.
+
+### Loss & metrics
+
+Naïve classification setups failed in subtle ways here. The current pipeline uses:
+
+**Soft labels with drift removal.** Targets are `sigmoid(excess_return × SOFT_LABEL_SCALE)`, clipped to `[0.02, 0.98]`. The *excess* return is the future return minus the per-series drift, which **centers the labels around 0.5** instead of around the overall up-rate of the training period. Without this de-meaning, the BCE-optimal solution is just to predict the constant up-rate (≈0.8 for a multi-month bull window) — the model collapses without learning anything.
+
+**Collapse-aware BCE.** Even with centered labels, plain BCE is trivially minimized by predicting the constant 0.5. To force the model off that degenerate attractor, the loss adds a hinge penalty on low batch-wise prediction std:
+
+```
+loss = BCE(y_true, y_pred) + max(0, COLLAPSE_MIN_STD − std(y_pred)) × COLLAPSE_WEIGHT
+```
+
+The penalty is zero once `std(y_pred) ≥ COLLAPSE_MIN_STD` and grows linearly below it. The model now has explicit pressure to *use* its inputs.
+
+**Direction-aware metrics.** Keras' built-in `"accuracy"` and `AUC` expect binary `y_true`; with soft floats they degenerate (AUC printed `0.0` every epoch — a real bug). They are replaced with two custom metrics:
+
+- **`DirectionalAccuracy`** — `mean((y_pred[:,0] > 0.5) == (y_true[:,0] > 0.5))` on horizon 0; the actual "% of bars where the predicted direction was right".
+- **`BinaryAUCFromSoft`** — standard AUC but with `y_true` binarized at 0.5 on horizon 0 before scoring.
+
+Training is monitored on **`val_dir_acc` (mode='max')** instead of `val_loss`: the loss floor with near-0.5 soft labels is `≈ 0.69` regardless of skill (entropy of the labels), so `val_loss` plateaus quickly and triggers EarlyStopping before the model finds a real direction. `val_dir_acc` doesn't have that floor.
+
+---
+
+## Guard rails
+
+Several layers prevent the bot from doing the wrong thing — both during training (so the agent doesn't learn bad habits) and during live trading (so a bad policy can't bleed all capital).
+
+### Training-time
+
+- **Fee curriculum.** The PPO trains under a fee that ramps from 0 to the production fee over 20 updates so the agent doesn't immediately suffocate under realistic costs. The best-checkpoint and early-stopping tracking is **suspended during the warmup** and reset at the first post-warmup update — otherwise update 1 (fee=0) is always "best", every subsequent update looks worse, and early-stop fires before real training begins.
+- **PPO early stopping with relative `min_delta`.** Improvement is counted only if `avg_reward` beats the best by more than `0.25%` (relative). Without this, tiny noise improvements keep resetting the patience counter and training runs the full 12-hour Kaggle session for nothing.
+- **Anti-collapse loss term** on the forecaster (see above).
+- **`val_dir_acc` early stopping** with `min_delta=0.001` and `mode='max'`. Training stops only when directional accuracy stops improving.
+- **Forecaster sanity-check cell** at the end of each training run. Reports `predMean`, `predStd`, `actualUpRate`, and `directionalAccuracy` over the most recent 200 candles, and tags the result `[OK] / [WARN] / [BLOCK]`. **Always read this before retraining the PPO** — a collapsed forecaster wastes a PPO session.
+
+### Runtime (TEST / INVEST)
+
+- **Hard SL/TP exits.** `TradingCycle.applyExitGuards` overrides the agent's action with a forced `SELL` whenever realized PnL crosses `−STOP_LOSS_PCT` or `+TAKE_PROFIT_PCT`. The PPO can recommend `HOLD` on a deep loser, but cannot prevent the stop from firing. Mirrors the training-environment guards exactly.
+- **Risk-based position sizing.** `ConservativeRiskPolicy.positionSizeFor` caps deployed cash so that hitting the stop-loss cannot lose more than `MAX_POSITION_RISK_PCT` of equity.
+- **Daily drawdown circuit breaker.** `shouldHaltTrading` compares current equity to a UTC-daily baseline. If the drop exceeds `MAX_DAILY_DRAWDOWN_PCT`, the session halts and the clock is cancelled. The baseline rolls over at 00:00 UTC so a long-running deployment can't silently turn the daily limit into a session-total limit.
+- **Pre-session `ForecastSanityCheck`.** Before each TEST/INVEST run, the same 200-bar diagnostic runs against the loaded model and logs a `[WARNING]` if the forecaster has collapsed.
+- **`assertExecutorMode`.** TEST refuses to run with a live executor; INVEST refuses to run with a paper one. A misconfigured run can't silently use the wrong wallet.
+- **Graceful shutdown.** `SIGINT` and `SIGTERM` cancel the trading clock and exit the loop cleanly.
+- **Exchange-unavailable kill switch.** If `BinanceLiveExecutor` raises `ExchangeUnavailableError`, the loop halts immediately instead of retrying with capital exposed against a broken API.
+
+---
+
+## How to use
+
+Training is **decoupled** from the runtime. The TypeScript runtime never trains — it just loads the converted models. Training is the user's choice between two platforms, both running the same code.
+
+### 1) Train the models (notebooks)
+
+Read [notebooks/README.md](notebooks/README.md) for the full instructions. In short:
+
+| Step | Where | Frequency |
+|---|---|---|
+| Build & publish dataset | `ai-spot-trading - Dataset.ipynb` on Kaggle. Output `dataset.npz` is published as the Kaggle Dataset `acaurangel/ai-spot-trading-dataset`. | Once (or whenever you want fresh candles). |
+| Train (your choice) | `ai-spot-trading - Kaggle.ipynb` on 2× T4 (free), **or** `ai-spot-trading - Colab.ipynb` on A100/T4. Both load `dataset.npz` automatically. | Per experiment. |
+| Download `tfjs_models.zip` | Kaggle/Colab output panel. Extract into `models/` of this repo (`models/bilstm/`, `models/ppo/policy/`, `models/ppo/value/`). | After each training run. |
+
+Why decoupled:
+- The dataset is downloaded + feature-engineered **once** and reused across every training run on either platform.
+- You pick the GPU you want this week (Kaggle 2× T4 for free 12h sessions, Colab A100 when you have credits).
+- The runtime stays tiny — no TensorFlow training stack to install locally.
+
+### 2) Backtest locally (TEST)
 
 ```bash
-# First run — saves every 5 epochs/episodes
-npm run train -- --checkpoint=./checkpoints/run-1
-
-# Interrupted? Run the same command again — it auto-resumes from the
-# last saved checkpoint (exact epoch, episode, LR, early-stopping memory).
-npm run train -- --checkpoint=./checkpoints/run-1
-
-# Custom frequency
-npm run train -- --checkpoint=./checkpoints/run-1 --checkpoint-every=10
-```
-
-What's preserved across a resume:
-- Forecaster: completed epochs, cosine-annealed LR, best `val_loss`, patience counter
-- Agent: completed episodes, `updateCount` (drives PPO LR decay)
-- Both: model weights
-
-Known limitation: the Adam optimizer's internal momentum is **not** preserved, so the first epoch after a resume may show slight gradient noise. The LR schedule itself is exact (derived from the epoch number, not optimizer state).
-
-Checkpoint directory layout:
-```
-./checkpoints/run-1/
-  metadata.json         counters, schedule state, input snapshot
-  forecaster/           BiLSTM weights
-  agent/policy/         PPO actor weights
-  agent/value/          PPO critic weights
-```
-
-### 2. TEST — backtest with real data
-
-```bash
+npm install
+cp .env.example .env       # edit symbol, risk params
 npm run test:strategy
 ```
 
-Downloads 1000 real Binance candles, then iterates candle by candle simulating trades using the trained models — **no money spent**. Reports two key metrics:
+Downloads recent Binance candles, replays them through the loaded models with no money spent, and prints a full report:
 
-| Metric | Description |
+| Metric | Meaning |
 |---|---|
-| **Directional accuracy** | % of forecaster predictions that matched the actual next-candle direction |
-| **Win rate** | % of closed trades that were profitable (after 0.1% fee per side) |
+| Directional accuracy | % of horizon-0 forecasts that matched the actual next-bar direction. |
+| Win rate | % of closed trades that were profitable (after fee + slippage). |
+| Avg win / Avg loss | Realized PnL magnitudes — together they give the R:R ratio. |
+| Expectancy / trade | Expected PnL per trade across the session. |
+| Profit factor | `sum(wins) / sum(losses)`; `>1` means net positive. |
+| Max drawdown | Worst peak-to-trough on the equity curve. |
+| Win / Loss streaks | Distribution + max — validates the streak-sizing assumption. |
 
-The verdict at the end flags whether win rate is within the target range of **52%–75%**:
-- `[OK]` — within range, model is beating random consistently
-- `[BELOW]` — below 52%, consider more training or hyperparameter tuning
-- `[ABOVE]` — above 75%, suspect overfitting or data leakage
+The verdict at the end is one of `[OK] / [MARGINAL] / [BLEED]` for the economic side, plus `[OK] / [BELOW] / [ABOVE]` for the win-rate target band (52–75%). **`[BLEED]` means the strategy loses money in expectation — do not move to live trading.**
 
-### 3. INVEST — real money 24/7
+### 3) Live trading (INVEST)
 
 ```bash
+# .env needs BINANCE_API_KEY, BINANCE_API_SECRET
+# Use BINANCE_TESTNET=true for paper-on-real-API trading first.
 npm run invest
 ```
 
-Loads the trained models, instantiates `BinanceLiveExecutor` (testnet or production via env), and runs the trading loop until `SIGINT`/`SIGTERM` or the drawdown circuit breaker triggers.
+Loads the trained models, instantiates `BinanceLiveExecutor`, and runs the loop until `SIGINT`/`SIGTERM` or the drawdown circuit breaker fires. All runtime guard rails (above) are active.
 
-**Built-in safeguards:**
-- `assertLiveExecutor()` — fails fast if misconfiguration would fall back to paper.
-- Circuit breaker — halts all trading if drawdown exceeds `MAX_DAILY_DRAWDOWN_PCT`.
-- Position sizing — never risks more than `MAX_POSITION_RISK_PCT` per trade.
-- Graceful shutdown — `SIGINT`/`SIGTERM` close the loop cleanly.
+### CPU vs GPU at runtime
 
-## Setup
-
-```bash
-cp .env.example .env
-# Edit .env with your Binance credentials and risk parameters
-npm install
-npm run train
-npm run test:strategy   # validate before going live!
-npm run invest          # only after thorough validation
-```
-
-## CPU vs GPU (CUDA)
-
-The bot supports both CPU and CUDA-accelerated GPU execution via TensorFlow.js. Backend selection happens at startup; once chosen, all training and inference run on it.
-
-### How it chooses
+Backtest and live inference can run on either CPU or CUDA GPU via `@tensorflow/tfjs-node` / `@tensorflow/tfjs-node-gpu`. Backend is chosen by:
 
 1. CLI flag: `--device=auto|cpu|gpu`
 2. Env var: `TF_DEVICE=auto|cpu|gpu`
-3. Default: `auto`
-
-`auto` tries GPU first and falls back to CPU if `@tensorflow/tfjs-node-gpu` is not installed or fails to load (missing CUDA, wrong driver, etc.). `gpu` attempts GPU and warns + falls back on failure. `cpu` forces CPU regardless.
-
-You'll see a line at startup like:
-```
-[TF] Backend: GPU (mode: auto)
-```
-
-### Installing GPU support
-
-`@tensorflow/tfjs-node-gpu` is declared as an `optionalDependency`, so `npm install` won't fail if your machine doesn't have CUDA. If the optional install was skipped, install it manually after setting up CUDA:
+3. Default: `auto` (tries GPU, falls back to CPU)
 
 ```bash
-npm install @tensorflow/tfjs-node-gpu
-```
-
-Requirements: NVIDIA GPU with CUDA Toolkit 11.8 and cuDNN 8.6 installed (the versions tfjs-node-gpu 4.x is built against).
-
-#### Windows — automated setup (CUDA 11.8 side-by-side)
-
-The repo ships a PowerShell installer that downloads and installs the exact CUDA version tfjs-node-gpu wants, **without touching your NVIDIA driver** or any other CUDA toolkit you already have. Multiple CUDA versions live in separate `v11.x`/`v12.x` folders by design — they don't conflict.
-
-```powershell
-# 1. Install CUDA 11.8 toolkit (downloads ~3 GB, runtime components only)
-npm run setup:cuda
-
-# 2. Download cuDNN 8.6 manually (NVIDIA login required, can't be automated):
-#    https://developer.nvidia.com/rdp/cudnn-archive
-#    → "Download cuDNN v8.6.0 (October 3rd, 2022), for CUDA 11.x"
-#    → "Local Installer for Windows (Zip)"
-# 3. Feed the ZIP back to the script:
-powershell -ExecutionPolicy Bypass -File scripts/setup-cuda.ps1 -CudnnZip "C:\Downloads\cudnn-windows-x86_64-8.6.0.163_cuda11-archive.zip"
-
-# 4. Install the GPU TF.js bindings
-npm install @tensorflow/tfjs-node-gpu
-
-# 5. Train/backtest with CUDA 11.8 scoped to the process
-#    (your system PATH stays as it was — other CUDA versions remain default
-#     for whatever else uses them)
-npm run train:cuda118
-npm run test:strategy:cuda118
-```
-
-The wrapper [scripts/run-with-cuda118.ps1](scripts/run-with-cuda118.ps1) can prefix any command:
-
-```powershell
-.\scripts\run-with-cuda118.ps1 nvcc --version
-.\scripts\run-with-cuda118.ps1 npx ts-node src/main.ts invest --device=gpu
-```
-
-### Convenience scripts
-
-```bash
-npm run train             # auto (GPU if available)
-npm run train:gpu         # force GPU (falls back to CPU if missing)
 npm run train:cpu         # force CPU
-npm run test:strategy:gpu # backtest on GPU
-
-# Generic form
-npm run train -- --device=gpu
-npm run test:strategy -- --device=cpu
+npm run train:gpu         # force GPU (warns + falls back if CUDA missing)
+npm run test:strategy:gpu
 ```
+
+GPU support requires NVIDIA CUDA Toolkit **11.8** and cuDNN **8.6** (the versions `tfjs-node-gpu` 4.x is built against). On Windows, the repo ships a PowerShell setup script:
+
+```powershell
+npm run setup:cuda
+# Manually download cuDNN 8.6 ZIP from NVIDIA, then:
+powershell -ExecutionPolicy Bypass -File scripts/setup-cuda.ps1 -CudnnZip "C:\path\to\cudnn-windows-x86_64-8.6.0.163_cuda11-archive.zip"
+npm install @tensorflow/tfjs-node-gpu
+npm run train:cuda118
+```
+
+Multiple CUDA versions coexist in separate `v11.x` / `v12.x` folders — the wrapper [scripts/run-with-cuda118.ps1](scripts/run-with-cuda118.ps1) prefixes the CUDA 11.8 paths to any command without touching your system PATH.
 
 ### Environment variables
 
 | Variable | Description | Example |
 |---|---|---|
 | `TRADING_SYMBOL` | Trading pair | `BTC/USDT` |
-| `TRADING_TIMEFRAME` | Candle interval | `1h` |
-| `INITIAL_CAPITAL_USD` | Starting capital in USD | `1000` |
-| `MAX_POSITION_RISK_PCT` | Fraction of cash used per trade | `0.1` |
-| `STOP_LOSS_PCT` | Stop-loss threshold | `0.02` |
-| `TAKE_PROFIT_PCT` | Take-profit threshold (symmetric to SL) | `0.02` |
-| `MAX_DAILY_DRAWDOWN_PCT` | Circuit breaker — resets at 00:00 UTC | `0.05` |
+| `TRADING_TIMEFRAME` | Candle interval | `15m` |
+| `INITIAL_CAPITAL_USD` | Starting capital (paper) | `1000` |
+| `MAX_POSITION_RISK_PCT` | Fraction of cash at risk per trade | `0.1` |
+| `STOP_LOSS_PCT` | Stop-loss threshold | `0.003` |
+| `TAKE_PROFIT_PCT` | Take-profit threshold | `0.005` |
+| `MAX_DAILY_DRAWDOWN_PCT` | Circuit breaker (resets 00:00 UTC) | `0.05` |
 | `SLIPPAGE_PCT` | Market-order slippage per side (paper + reward) | `0.0005` |
-| `BINANCE_API_KEY` | Binance API key (invest mode only) | — |
-| `BINANCE_API_SECRET` | Binance API secret (invest mode only) | — |
+| `BINANCE_API_KEY` | Binance API key (invest mode) | — |
+| `BINANCE_API_SECRET` | Binance API secret (invest mode) | — |
 | `BINANCE_TESTNET` | Use Binance testnet | `true` |
 | `TF_DEVICE` | TF backend: `auto`, `cpu`, or `gpu` (CLI flag wins) | `auto` |
 
-## Recommended execution order
+### Recommended progression
 
-1. **train** → generates `./models/bilstm` and `./models/ppo`
-2. **test** → run the backtest, check that win rate is in the 52%–75% range
-3. **invest with testnet** (`BINANCE_TESTNET=true`) → weeks of validation
-4. **invest with small amounts** ($50–100) in real production
-5. Scale gradually only if metrics remain consistent
+1. **Train** in a notebook → download `tfjs_models.zip` → extract into `models/`.
+2. **Backtest** locally (`npm run test:strategy`). Iterate on the model until the verdict is `[OK]` and Profit Factor is comfortably `> 1`.
+3. **Paper-trade against the testnet** (`BINANCE_TESTNET=true`) for at least a couple of weeks to see how live latency / slippage / partial fills affect the realized PnL versus the backtest.
+4. **Small real positions** ($50–$100) once the testnet results are consistent.
+5. Scale only if metrics remain stable.
+
+---
+
+## Design principles
+
+### SOLID
+
+- **Single Responsibility:** each class does one thing. `FeatureBuilder` builds features. `RiskPolicy` evaluates risk. `TradingCycle` orchestrates one tick.
+- **Open/Closed:** new modes = new entry in `Map<string, Command>`. `Cli.ts` itself doesn't change.
+- **Liskov:** `PaperExecutor`, `BinanceLiveExecutor`, future executors — interchangeable through `TradeExecutor`.
+- **Interface Segregation:** small, focused ports. `MarketDataProvider` only reads, never executes.
+- **Dependency Inversion:** `application/` depends on `domain/ports/`, never on TF.js or ccxt.
+
+### Object Calisthenics
+
+- **#3 Wrap primitives:** `Money`, `Price`, `Quantity`, `Percentage` — never a bare `number`.
+- **#4 First-class collections:** `CandleSeries`, `FeatureMatrix`, `TradeLedger`.
+- **#5 One dot per line:** *Tell don't ask* — `position.unrealizedPnL(price)`, not `position.entryPrice / current * 100`.
+- **#6 No abbreviations:** `executionPrice`, not `execPx`.
+- **#7 Small entities.**
+- **#8 Max 2 instance variables** where the domain allows it (value objects, `Portfolio` = cash + position).
+- **#9 No getters/setters:** behavior over exposure. `position.isOpen()`, not `position.quantity > 0`.
+
+---
 
 ## Disclaimer
 
-This code is educational. Algorithmic trading carries a real risk of total financial loss. RL models in financial markets frequently show strong backtest metrics and fail in production due to overfitting, regime change, and unmodeled slippage. Audit, test, validate. Do not use money you cannot afford to lose.
+This code is educational. Algorithmic trading carries a real risk of total financial loss. RL models in financial markets frequently show strong backtest metrics and then fail in production due to overfitting, regime change, and unmodeled slippage. **Audit, test, validate.** Do not use money you cannot afford to lose.

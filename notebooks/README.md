@@ -1,14 +1,13 @@
 # Notebooks
 
-Three notebooks form the training pipeline. The dataset construction is decoupled from training so the heavy work (candle download + feature engineering) is done **once** and reused across every training run on either platform.
+Two notebooks form the training pipeline. The dataset construction is decoupled from training so the heavy work (candle download + feature engineering) is done **once** and reused across every training run.
 
 | Notebook | Where it runs | Purpose |
 |---|---|---|
 | `ai-spot-trading - Dataset.ipynb` | Kaggle (no GPU needed) | Downloads candles, builds features, splits, saves `dataset.npz`. Published as a Kaggle Dataset. |
 | `ai-spot-trading - Kaggle.ipynb` | Kaggle (2× T4 GPU) | Trains BiLSTM + PPO. Loads the dataset from `/kaggle/input/`. Uses `MirroredStrategy`. |
-| `ai-spot-trading - Colab.ipynb` | Colab (A100 / T4) | Same training pipeline. Loads the dataset via `kagglehub`. Uses default strategy (single GPU). |
 
-The three notebooks share the same model definitions, reward shaping, and loss function. They differ only in where they get the data and how they distribute compute.
+The notebooks share the same model definitions, reward shaping, and loss function.
 
 ---
 
@@ -25,16 +24,15 @@ The three notebooks share the same model definitions, reward shaping, and loss f
                   publishes to ──┴── Kaggle Dataset
                                      acaurangel/ai-spot-trading-dataset
                                           │
-                  ┌───────────────────────┴────────────────────────┐
-                  │                                                │
-       ┌──────────▼──────────┐                          ┌──────────▼──────────┐
-       │ ai-spot-trading -    │                         │ ai-spot-trading -    │
-       │ Kaggle.ipynb         │                         │ Colab.ipynb          │
-       │ (2× T4, NCCL)        │                         │ (1× A100/T4)         │
-       │                      │                         │                      │
-       │ /kaggle/input/...    │                         │ kagglehub.download() │
-       │ → BiLSTM → PPO       │                         │ → BiLSTM → PPO       │
-       └──────────────────────┘                         └──────────────────────┘
+                                          │
+                               ┌──────────▼───────────┐
+                               │ ai-spot-trading -    │
+                               │ Kaggle.ipynb         │
+                               │ (2× T4, NCCL)        │
+                               │                      │
+                               │ /kaggle/input/...    │
+                               │ → BiLSTM → PPO       │
+                               └──────────────────────┘
 ```
 
 `dataset.npz` is a single compressed bundle containing:
@@ -65,21 +63,6 @@ Run on Kaggle (no GPU required):
 3. **+ Add Data** → search `acaurangel/ai-spot-trading-dataset` → add. It now appears at `/kaggle/input/ai-spot-trading-dataset/dataset.npz`.
 4. Run all. The Load cell auto-detects the Kaggle path and reads the npz directly.
 5. `MirroredStrategy` activates because `len(gpus) > 1`; the `dist_scope()` helper enters the real distributed scope. PPO trains across both GPUs via NCCL all-reduce.
-
-### 3) Train on Colab (1 GPU)
-
-One-time setup:
-
-1. On [kaggle.com](https://www.kaggle.com/) → account settings → **Create New API Token** → downloads `kaggle.json`.
-2. In Colab, upload that token once: `mkdir -p ~/.kaggle && mv kaggle.json ~/.kaggle/ && chmod 600 ~/.kaggle/kaggle.json`.
-
-Then per training run:
-
-1. Open `ai-spot-trading - Colab.ipynb`.
-2. **Runtime → Change runtime type → GPU (A100 recommended)**.
-3. **Runtime → Disconnect and delete runtime**, then reconnect (clean CUDA context).
-4. Run all. The Load cell detects there is no `/kaggle/input/` path and falls back to `kagglehub.dataset_download(...)`, which fetches the published dataset (cached in `~/.cache/kagglehub/` for subsequent runs).
-5. On a single GPU `dist_scope()` returns `nullcontext()`, so models are built outside the default-strategy scope (avoids the `CUDA_ERROR_INVALID_HANDLE` issue with single-GPU default strategy in some TF builds).
 
 ---
 
@@ -114,10 +97,6 @@ After every BiLSTM retrain, the training notebooks run a **Forecaster sanity che
 
 ## Troubleshooting
 
-**`CUDA_ERROR_INVALID_HANDLE` on Colab during model build.** Disconnect and **delete** the runtime (not just Restart), then reconnect. A plain Restart can leave a corrupted CUDA context from a previous failed run.
-
 **`max_seq_length <= 0` in CudnnRNN on Kaggle.** This happened when `forecaster.predict(x)` was called with a small batch under `MirroredStrategy` — one replica received batch=0. The inference cells already use the eager call `forecaster(x, training=False).numpy()` to avoid this. If you write new inference code, prefer the eager call over `.predict()`.
 
-**`Activation: tanh has not been implemented for the Node.js backend`** at TS inference time. The tfjs-node backend does not support `tanh` in the fused `_FusedMatMul[Tanh]` path. The conversion cell runs `_unfuse_tanh(...)` on every exported model.json to split those nodes into `MatMul → BiasAdd → Tanh` (Tanh as a standalone op is supported). If you re-export models manually, run the same patch.
-
-**Dataset version drift.** When the dataset is republished, the Kaggle path `/kaggle/input/ai-spot-trading-dataset/` always points at the latest attached version. On Colab, `kagglehub.dataset_download(...)` caches per version — delete `~/.cache/kagglehub/datasets/acaurangel/ai-spot-trading-dataset/` to force a refresh.
+**Dataset version drift.** When the dataset is republished, the Kaggle path `/kaggle/input/ai-spot-trading-dataset/` always points at the latest attached version.

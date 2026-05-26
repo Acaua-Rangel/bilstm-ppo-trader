@@ -1,6 +1,6 @@
 # AI Trading Bot
 
-A TypeScript trading bot driven by a two-stage model: a **CNN → BiLSTM → Multi-Head Attention** forecaster predicting next-bar direction, and a **PPO** reinforcement-learning agent deciding when to enter and exit. Training runs in Jupyter notebooks (Kaggle or Colab — your choice); the TypeScript runtime only loads the converted models for backtesting and live trading.
+A TypeScript trading bot driven by a two-stage model: a **CNN → BiLSTM → Multi-Head Attention** forecaster predicting next-bar direction, and a **PPO** reinforcement-learning agent deciding when to enter and exit. Training runs in Jupyter notebooks on Kaggle; the TypeScript runtime only loads the converted models for backtesting and live trading.
 
 ---
 
@@ -38,10 +38,9 @@ src/
 │
 └── main.ts                    Entry point
 
-notebooks/                     Training pipeline (Kaggle / Colab)
+notebooks/                     Training pipeline (Kaggle)
 ├── ai-spot-trading - Dataset.ipynb   Builds and publishes the dataset
 ├── ai-spot-trading - Kaggle.ipynb    Training on Kaggle (2× T4, MirroredStrategy)
-├── ai-spot-trading - Colab.ipynb     Training on Colab (A100/T4, single GPU)
 └── README.md                          Notebook-specific instructions
 ```
 
@@ -153,7 +152,7 @@ Several layers prevent the bot from doing the wrong thing — both during traini
 
 ## How to use
 
-Training is **decoupled** from the runtime. The TypeScript runtime never trains — it just loads the converted models. Training is the user's choice between two platforms, both running the same code.
+Training is **decoupled** from the runtime. The TypeScript runtime never trains — it just loads the converted models.
 
 ### 1) Train the models (notebooks)
 
@@ -162,12 +161,11 @@ Read [notebooks/README.md](notebooks/README.md) for the full instructions. In sh
 | Step | Where | Frequency |
 |---|---|---|
 | Build & publish dataset | `ai-spot-trading - Dataset.ipynb` on Kaggle. Output `dataset.npz` is published as the Kaggle Dataset `acaurangel/ai-spot-trading-dataset`. | Once (or whenever you want fresh candles). |
-| Train (your choice) | `ai-spot-trading - Kaggle.ipynb` on 2× T4 (free), **or** `ai-spot-trading - Colab.ipynb` on A100/T4. Both load `dataset.npz` automatically. | Per experiment. |
-| Download `tfjs_models.zip` | Kaggle/Colab output panel. Extract into `models/` of this repo (`models/bilstm/`, `models/ppo/policy/`, `models/ppo/value/`). | After each training run. |
+| Train | `ai-spot-trading - Kaggle.ipynb` on 2× T4. Loads `dataset.npz` automatically. | Per experiment. |
+| Download `python_models.zip` | Kaggle output panel. Extract into `models/` of this repo. | After each training run. |
 
 Why decoupled:
-- The dataset is downloaded + feature-engineered **once** and reused across every training run on either platform.
-- You pick the GPU you want this week (Kaggle 2× T4 for free 12h sessions, Colab A100 when you have credits).
+- The dataset is downloaded + feature-engineered **once** and reused across every training run.
 - The runtime stays tiny — no TensorFlow training stack to install locally.
 
 ### 2) Backtest locally (TEST)
@@ -247,7 +245,7 @@ Multiple CUDA versions coexist in separate `v11.x` / `v12.x` folders — the wra
 
 ### Recommended progression
 
-1. **Train** in a notebook → download `tfjs_models.zip` → extract into `models/`.
+1. **Train** in a notebook → download `python_models.zip` → extract into `models/`.
 2. **Backtest** locally (`npm run test:strategy`). Iterate on the model until the verdict is `[OK]` and Profit Factor is comfortably `> 1`.
 3. **Paper-trade against the testnet** (`BINANCE_TESTNET=true`) for at least a couple of weeks to see how live latency / slippage / partial fills affect the realized PnL versus the backtest.
 4. **Small real positions** ($50–$100) once the testnet results are consistent.

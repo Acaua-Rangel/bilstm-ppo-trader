@@ -1,0 +1,53 @@
+@import url('https://fonts.googleapis.com/css2?family=League+Spartan:wght@300;400;600;800&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-background text-white font-sans overflow-x-hidden;
+  }
+}
+
+.glass-card {
+  @apply bg-white/5 backdrop-blur-md border border-white/10 rounded-2xl shadow-2xl;
+}
+
+/* Custom CSS to animate gradient borders like in the portfolio */
+@property --border-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+.animated-border-btn {
+  background: conic-gradient(from 0deg, #71c829 var(--border-angle), transparent 0deg);
+  --border-angle: 0deg;
+  cursor: pointer;
+  transition: --border-angle 0.6s;
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 9999px; /* fully rounded */
+}
+
+.animated-border-btn:hover {
+  --border-angle: 360deg;
+}
+
+.btn-inner {
+  @apply bg-background w-full h-full rounded-full px-6 py-3 flex items-center justify-center gap-2;
+}
+
+.loader-container {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: #062A0D;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}

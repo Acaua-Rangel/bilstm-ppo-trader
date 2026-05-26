@@ -5,3 +5,7 @@ node_modules
 dist/
 models/
 .venv
+
+# .NET secrets (contém Google ClientId, JWT secret, Encryption key)
+appsettings.Development.json
+appsettings.*.Local.json

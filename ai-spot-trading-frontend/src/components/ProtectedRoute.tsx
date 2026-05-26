@@ -1,13 +1,19 @@
-import React from 'react';
 import { Navigate, Outlet } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
 export const ProtectedRoute = () => {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center text-white/60">
+        Carregando…
+      </div>
+    );
+  }
 
   if (!isAuthenticated) {
-    // Redireciona para o login (ou Landing Page) se não estiver autenticado
-    return <Navigate to="/auth/callback?code=mock_binance_code" replace />;
+    return <Navigate to="/login" replace />;
   }
 
   return <Outlet />;

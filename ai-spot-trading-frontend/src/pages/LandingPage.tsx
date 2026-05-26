@@ -30,7 +30,7 @@ export const LandingPage = () => {
     if (isAuthenticated) {
       navigate('/dashboard');
     } else {
-      navigate('/auth/callback?code=mock_binance_code');
+      navigate('/login');
     }
   };
 

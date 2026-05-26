@@ -3,22 +3,32 @@ using AiSpotTrading.Backend.DTOs;
 
 namespace AiSpotTrading.Backend.Validators
 {
-    public class BinanceOAuthRequestDtoValidator : AbstractValidator<BinanceOAuthRequestDto>
+    public class GoogleLoginRequestDtoValidator : AbstractValidator<GoogleLoginRequestDto>
     {
-        public BinanceOAuthRequestDtoValidator()
+        public GoogleLoginRequestDtoValidator()
         {
-            RuleFor(x => x.Code).NotEmpty().WithMessage("O código OAuth é obrigatório.");
-            RuleFor(x => x.RedirectUri).NotEmpty().WithMessage("A URI de redirecionamento é obrigatória.");
+            RuleFor(x => x.IdToken).NotEmpty().WithMessage("idToken do Google é obrigatório.");
         }
     }
 
-    public class UserConfigUpdateDtoValidator : AbstractValidator<UserConfigUpdateDto>
+    public class CreateExchangeAccountDtoValidator : AbstractValidator<CreateExchangeAccountDto>
     {
-        public UserConfigUpdateDtoValidator()
+        public CreateExchangeAccountDtoValidator()
         {
-            RuleFor(x => x.AllocatedBalance)
-                .GreaterThanOrEqualTo(0)
+            RuleFor(x => x.ApiKey).NotEmpty().MinimumLength(20)
+                .WithMessage("API Key inválida.");
+            RuleFor(x => x.ApiSecret).NotEmpty().MinimumLength(20)
+                .WithMessage("API Secret inválido.");
+            RuleFor(x => x.AllocatedBalance).GreaterThanOrEqualTo(0)
                 .WithMessage("O saldo alocado não pode ser negativo.");
+        }
+    }
+
+    public class UpdateExchangeAccountDtoValidator : AbstractValidator<UpdateExchangeAccountDto>
+    {
+        public UpdateExchangeAccountDtoValidator()
+        {
+            RuleFor(x => x.AllocatedBalance).GreaterThanOrEqualTo(0);
         }
     }
 }

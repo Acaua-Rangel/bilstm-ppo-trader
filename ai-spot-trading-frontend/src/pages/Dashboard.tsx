@@ -3,15 +3,13 @@ import { useAuth } from '../context/AuthContext';
 import { Wallet, CheckCircle, Power, Play } from 'lucide-react';
 
 export const Dashboard = () => {
-  const { binanceUid } = useAuth();
+  const { user } = useAuth();
   const [balance, setBalance] = useState(1000.0);
   const [isActive, setIsActive] = useState(true);
 
-  // MOCK: Em produção faremos fetch em `http://localhost:5000/api/trade/{binanceUid}`
   useEffect(() => {
-    // Simulando chamada na API para pegar o balance atual e configuração do usuário
-    console.log("Fetching data for UID:", binanceUid);
-  }, [binanceUid]);
+    console.log("Fetching data for UID:", user?.binanceUid);
+  }, [user]);
 
   return (
     <div className="min-h-screen pt-32 pb-20 px-6">

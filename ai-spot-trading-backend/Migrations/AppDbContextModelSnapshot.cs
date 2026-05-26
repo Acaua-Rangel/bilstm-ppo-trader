@@ -39,6 +39,9 @@ namespace AiSpotTrading.Backend.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("varchar(100)");
 
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
                     b.Property<string>("EncryptedApiKey")
                         .IsRequired()
                         .HasMaxLength(1000)
@@ -55,7 +58,12 @@ namespace AiSpotTrading.Backend.Migrations
                     b.Property<bool>("IsPaperTrading")
                         .HasColumnType("tinyint(1)");
 
+                    b.Property<int>("UserId")
+                        .HasColumnType("int");
+
                     b.HasKey("Id");
+
+                    b.HasIndex("UserId");
 
                     b.ToTable("ExchangeAccounts");
                 });
@@ -121,19 +129,29 @@ namespace AiSpotTrading.Backend.Migrations
                         .HasColumnType("varchar(500)");
 
                     b.Property<string>("BinanceUid")
-                        .IsRequired()
                         .HasMaxLength(100)
                         .HasColumnType("varchar(100)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
 
                     b.Property<string>("Email")
                         .HasMaxLength(200)
                         .HasColumnType("varchar(200)");
+
+                    b.Property<string>("GoogleSub")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("varchar(100)");
 
                     b.Property<string>("Name")
                         .HasMaxLength(100)
                         .HasColumnType("varchar(100)");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("GoogleSub")
+                        .IsUnique();
 
                     b.ToTable("Users");
                 });

@@ -1,10 +1,10 @@
-import React from 'react';
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
-import { AuthProvider } from './context/AuthContext';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { AuthProvider, useAuth } from './context/AuthContext';
 import { Header } from './components/Header';
 import { LandingPage } from './pages/LandingPage';
+import { Login } from './pages/Login';
+import { ConnectBinance } from './pages/ConnectBinance';
 import { Dashboard } from './pages/Dashboard';
-import { AuthCallback } from './pages/AuthCallback';
 import { ProtectedRoute } from './components/ProtectedRoute';
 
 function App() {
@@ -15,22 +15,30 @@ function App() {
           <Header />
           <main>
             <Routes>
-              {/* Rota pública (Landing Page) */}
               <Route path="/" element={<LandingPage />} />
-              
-              {/* Rota para processar a volta do login da Binance */}
-              <Route path="/auth/callback" element={<AuthCallback />} />
-              
-              {/* Rotas protegidas (Só acessa se autenticado) */}
+              <Route path="/login" element={<Login />} />
+
               <Route element={<ProtectedRoute />}>
-                <Route path="/dashboard" element={<Dashboard />} />
+                <Route path="/onboarding/api-keys" element={<ConnectBinance />} />
+                <Route path="/dashboard" element={<DashboardGate />} />
               </Route>
+
+              <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </main>
         </div>
       </BrowserRouter>
     </AuthProvider>
   );
+}
+
+// Força o usuário a conectar a Binance antes de ver o Dashboard.
+function DashboardGate() {
+  const { user } = useAuth();
+  if (user && !user.hasExchangeAccount) {
+    return <Navigate to="/onboarding/api-keys" replace />;
+  }
+  return <Dashboard />;
 }
 
 export default App;

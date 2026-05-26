@@ -1,50 +1,69 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import { api } from '../api/client';
+import type { Me } from '../api/client';
 
 interface AuthContextType {
+  user: Me | null;
   isAuthenticated: boolean;
-  binanceUid: string | null;
-  login: (uid: string) => void;
-  logout: () => void;
+  loading: boolean;
+  loginWithGoogle: (idToken: string) => Promise<void>;
+  logout: () => Promise<void>;
+  refresh: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [binanceUid, setBinanceUid] = useState<string | null>(null);
+  const [user, setUser] = useState<Me | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    // Check local storage for existing session
-    const storedUid = localStorage.getItem('binanceUid');
-    if (storedUid) {
-      setBinanceUid(storedUid);
-      setIsAuthenticated(true);
+  const refresh = useCallback(async () => {
+    try {
+      const me = await api.me();
+      setUser(me);
+    } catch {
+      setUser(null);
     }
   }, []);
 
-  const login = (uid: string) => {
-    localStorage.setItem('binanceUid', uid);
-    setBinanceUid(uid);
-    setIsAuthenticated(true);
-  };
+  useEffect(() => {
+    (async () => {
+      await refresh();
+      setLoading(false);
+    })();
+  }, [refresh]);
 
-  const logout = () => {
-    localStorage.removeItem('binanceUid');
-    setBinanceUid(null);
-    setIsAuthenticated(false);
-  };
+  const loginWithGoogle = useCallback(async (idToken: string) => {
+    const me = await api.googleLogin(idToken);
+    setUser(me);
+  }, []);
+
+  const logout = useCallback(async () => {
+    try {
+      await api.logout();
+    } finally {
+      setUser(null);
+    }
+  }, []);
 
   return (
-    <AuthContext.Provider value={{ isAuthenticated, binanceUid, login, logout }}>
+    <AuthContext.Provider
+      value={{
+        user,
+        isAuthenticated: user !== null,
+        loading,
+        loginWithGoogle,
+        logout,
+        refresh,
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );
 }
 
 export function useAuth() {
-  const context = useContext(AuthContext);
-  if (context === undefined) {
-    throw new Error('useAuth must be used within an AuthProvider');
-  }
-  return context;
+  const ctx = useContext(AuthContext);
+  if (!ctx) throw new Error('useAuth must be used within an AuthProvider');
+  return ctx;
 }

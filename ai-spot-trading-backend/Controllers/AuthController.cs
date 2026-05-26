@@ -1,71 +1,139 @@
+using System.Security.Claims;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using System.Threading.Tasks;
+using Google.Apis.Auth;
 using AiSpotTrading.Backend.DTOs;
-using AiSpotTrading.Backend.Repositories;
 using AiSpotTrading.Backend.Models;
+using AiSpotTrading.Backend.Repositories;
+using AiSpotTrading.Backend.Services;
 
 namespace AiSpotTrading.Backend.Controllers
 {
     [ApiController]
-    [Route("api/[controller]")]
+    [Route("api/auth")]
     public class AuthController : ControllerBase
     {
+        private const string CookieName = "ast_session";
+
         private readonly IUserRepository _userRepo;
         private readonly IExchangeAccountRepository _accountRepo;
+        private readonly IJwtService _jwt;
+        private readonly IConfiguration _config;
+        private readonly ILogger<AuthController> _logger;
 
-        public AuthController(IUserRepository userRepo, IExchangeAccountRepository accountRepo)
+        public AuthController(
+            IUserRepository userRepo,
+            IExchangeAccountRepository accountRepo,
+            IJwtService jwt,
+            IConfiguration config,
+            ILogger<AuthController> logger)
         {
             _userRepo = userRepo;
             _accountRepo = accountRepo;
+            _jwt = jwt;
+            _config = config;
+            _logger = logger;
         }
 
-        [HttpPost("binance-login")]
-        public async Task<IActionResult> BinanceLogin([FromBody] BinanceOAuthRequestDto request)
+        [HttpPost("google")]
+        public async Task<IActionResult> GoogleLogin([FromBody] GoogleLoginRequestDto dto)
         {
-            // MOCK: Em produção, o backend chamaria a Binance OAuth API para trocar o `request.Code`
-            // pelo Token de Acesso e para criar o Binance Fast API Key.
-            // Para efeitos de desenvolvimento do Beta, vamos mocar a criação:
-            
-            var mockUid = "BINANCE_UID_" + new Random().Next(1000, 9999);
-            
-            var user = await _userRepo.GetUserByBinanceUidAsync(mockUid);
-            if (user == null)
-            {
-                user = new User 
-                { 
-                    BinanceUid = mockUid,
-                    Name = "Trader Beta",
-                    AvatarUrl = ""
-                };
-                await _userRepo.CreateUserAsync(user);
+            var clientId = _config["Google:ClientId"]
+                ?? Environment.GetEnvironmentVariable("GOOGLE_CLIENT_ID");
+            if (string.IsNullOrEmpty(clientId))
+                return StatusCode(500, new { error = "Google Client ID não configurado." });
 
-                var account = new ExchangeAccount
+            GoogleJsonWebSignature.Payload payload;
+            try
+            {
+                payload = await GoogleJsonWebSignature.ValidateAsync(dto.IdToken, new GoogleJsonWebSignature.ValidationSettings
                 {
-                    BinanceUid = mockUid,
-                    EncryptedApiKey = "mocked_encrypted_api_key",
-                    EncryptedApiSecret = "mocked_encrypted_secret",
-                    AllocatedBalance = 1000, // Saldo inicial paper
-                    IsPaperTrading = true,
-                    IsActive = true
-                };
-                await _accountRepo.CreateAccountAsync(account);
+                    Audience = new[] { clientId }
+                });
+            }
+            catch (InvalidJwtException ex)
+            {
+                _logger.LogWarning(ex, "ID token do Google inválido.");
+                return Unauthorized(new { error = "ID token inválido." });
             }
 
-            return Ok(new { Message = "Login efetuado com sucesso via Binance Fast API.", BinanceUid = user.BinanceUid });
+            var user = await _userRepo.GetByGoogleSubAsync(payload.Subject);
+            if (user == null)
+            {
+                user = new User
+                {
+                    GoogleSub = payload.Subject,
+                    Email = payload.Email,
+                    Name = payload.Name,
+                    AvatarUrl = payload.Picture
+                };
+                await _userRepo.CreateUserAsync(user);
+            }
+            else
+            {
+                // Refresh perfil
+                user.Email = payload.Email;
+                user.Name = payload.Name;
+                user.AvatarUrl = payload.Picture;
+                await _userRepo.UpdateUserAsync(user);
+            }
+
+            var token = _jwt.CreateToken(user);
+            SetSessionCookie(token);
+
+            return Ok(await BuildMeAsync(user));
         }
 
-        [HttpPut("config/{binanceUid}")]
-        public async Task<IActionResult> UpdateConfig(string binanceUid, [FromBody] UserConfigUpdateDto dto)
+        [Authorize]
+        [HttpGet("me")]
+        public async Task<IActionResult> Me()
         {
-            var account = await _accountRepo.GetAccountByBinanceUidAsync(binanceUid);
-            if (account == null) return NotFound("Conta não encontrada.");
+            var user = await GetCurrentUserAsync();
+            if (user == null) return Unauthorized();
+            return Ok(await BuildMeAsync(user));
+        }
 
-            account.AllocatedBalance = dto.AllocatedBalance;
-            account.IsPaperTrading = dto.IsPaperTrading;
-            account.IsActive = dto.IsActive;
+        [Authorize]
+        [HttpPost("logout")]
+        public IActionResult Logout()
+        {
+            Response.Cookies.Delete(CookieName);
+            return NoContent();
+        }
 
-            await _accountRepo.UpdateAccountAsync(account);
-            return Ok(account);
+        private void SetSessionCookie(string token)
+        {
+            var secure = !string.Equals(_config["Cookie:Secure"], "false", StringComparison.OrdinalIgnoreCase);
+            Response.Cookies.Append(CookieName, token, new CookieOptions
+            {
+                HttpOnly = true,
+                Secure = secure,
+                SameSite = SameSiteMode.Lax,
+                Expires = DateTimeOffset.UtcNow.AddDays(7),
+                Path = "/"
+            });
+        }
+
+        private async Task<User?> GetCurrentUserAsync()
+        {
+            var sub = User.FindFirstValue(ClaimTypes.NameIdentifier)
+                   ?? User.FindFirstValue("sub");
+            if (!int.TryParse(sub, out var id)) return null;
+            return await _userRepo.GetByIdAsync(id);
+        }
+
+        private async Task<MeResponseDto> BuildMeAsync(User user)
+        {
+            var accounts = await _accountRepo.GetByUserIdAsync(user.Id);
+            return new MeResponseDto
+            {
+                Id = user.Id,
+                Email = user.Email,
+                Name = user.Name,
+                AvatarUrl = user.AvatarUrl,
+                BinanceUid = user.BinanceUid,
+                HasExchangeAccount = accounts.Any()
+            };
         }
     }
 }

@@ -16,10 +16,14 @@ namespace AiSpotTrading.Backend.Repositories
             _context = context;
         }
 
-        public async Task<ExchangeAccount?> GetAccountByBinanceUidAsync(string binanceUid)
-        {
-            return await _context.ExchangeAccounts.FirstOrDefaultAsync(a => a.BinanceUid == binanceUid);
-        }
+        public Task<ExchangeAccount?> GetByIdAsync(int id)
+            => _context.ExchangeAccounts.FirstOrDefaultAsync(a => a.Id == id);
+
+        public Task<ExchangeAccount?> GetAccountByBinanceUidAsync(string binanceUid)
+            => _context.ExchangeAccounts.FirstOrDefaultAsync(a => a.BinanceUid == binanceUid);
+
+        public async Task<IEnumerable<ExchangeAccount>> GetByUserIdAsync(int userId)
+            => await _context.ExchangeAccounts.Where(a => a.UserId == userId).ToListAsync();
 
         public async Task<ExchangeAccount> CreateAccountAsync(ExchangeAccount account)
         {
@@ -31,6 +35,12 @@ namespace AiSpotTrading.Backend.Repositories
         public async Task UpdateAccountAsync(ExchangeAccount account)
         {
             _context.ExchangeAccounts.Update(account);
+            await _context.SaveChangesAsync();
+        }
+
+        public async Task DeleteAsync(ExchangeAccount account)
+        {
+            _context.ExchangeAccounts.Remove(account);
             await _context.SaveChangesAsync();
         }
 

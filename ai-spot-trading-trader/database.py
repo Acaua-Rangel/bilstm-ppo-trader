@@ -4,11 +4,72 @@ from config import Config
 
 logger = logging.getLogger(__name__)
 
+
+# DDL espelhado das migrations do backend (.NET / Pomelo).
+# Usado apenas como rede de segurança caso o backend ainda não tenha rodado.
+_TABLE_DDL = {
+    "ExchangeAccounts": """
+        CREATE TABLE IF NOT EXISTS `ExchangeAccounts` (
+            `Id` INT NOT NULL AUTO_INCREMENT,
+            `BinanceUid` VARCHAR(100) NOT NULL,
+            `EncryptedApiKey` VARCHAR(1000) NOT NULL,
+            `EncryptedApiSecret` VARCHAR(1000) NOT NULL,
+            `AllocatedBalance` DECIMAL(18,8) NOT NULL,
+            `IsPaperTrading` TINYINT(1) NOT NULL,
+            `IsActive` TINYINT(1) NOT NULL,
+            PRIMARY KEY (`Id`)
+        ) CHARACTER SET=utf8mb4;
+    """,
+    "Trades": """
+        CREATE TABLE IF NOT EXISTS `Trades` (
+            `Id` INT NOT NULL AUTO_INCREMENT,
+            `BinanceUid` VARCHAR(100) NOT NULL,
+            `Symbol` VARCHAR(50) NOT NULL,
+            `Action` VARCHAR(20) NOT NULL,
+            `Amount` DECIMAL(18,8) NOT NULL,
+            `Price` DECIMAL(18,8) NOT NULL,
+            `Timestamp` DATETIME(6) NOT NULL,
+            `Type` VARCHAR(20) NOT NULL,
+            `PnL` DECIMAL(18,8) NOT NULL,
+            PRIMARY KEY (`Id`)
+        ) CHARACTER SET=utf8mb4;
+    """,
+}
+
+
 class Database:
     def __init__(self):
         self.pool = None
 
+    async def _ensure_database_exists(self):
+        """Conecta ao servidor MySQL sem selecionar DB e garante que o schema exista."""
+        conn = await aiomysql.connect(
+            host=Config.MYSQL_HOST,
+            port=Config.MYSQL_PORT,
+            user=Config.MYSQL_USER,
+            password=Config.MYSQL_PASSWORD,
+            autocommit=True,
+        )
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"CREATE DATABASE IF NOT EXISTS `{Config.MYSQL_DB}` "
+                    f"CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+                )
+            logger.info("Database '%s' verificado/criado.", Config.MYSQL_DB)
+        finally:
+            conn.close()
+
+    async def _ensure_tables_exist(self):
+        """Cria as tabelas usadas pelo trader caso ainda não existam."""
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                for name, ddl in _TABLE_DDL.items():
+                    await cur.execute(ddl)
+                    logger.info("Tabela '%s' verificada/criada.", name)
+
     async def connect(self):
+        await self._ensure_database_exists()
         self.pool = await aiomysql.create_pool(
             host=Config.MYSQL_HOST,
             port=Config.MYSQL_PORT,
@@ -17,14 +78,16 @@ class Database:
             db=Config.MYSQL_DB,
             autocommit=True
         )
+        await self._ensure_tables_exist()
         logger.info("Connected to MySQL database.")
 
     async def get_active_users(self):
         """Busca contas de usuários elegíveis para trade, separando reais de paper trading."""
         query = """
-            SELECT ExchangeAccountID, BinanceUID, EncryptedApiKey, EncryptedApiSecret, 
-                   AllocatedBalance, IsPaperTrading 
-            FROM ExchangeAccounts 
+            SELECT Id AS ExchangeAccountID, BinanceUid AS BinanceUID,
+                   EncryptedApiKey, EncryptedApiSecret,
+                   AllocatedBalance, IsPaperTrading
+            FROM ExchangeAccounts
             WHERE IsActive = 1 AND AllocatedBalance > 0
         """
         async with self.pool.acquire() as conn:
@@ -36,20 +99,20 @@ class Database:
         """Salva a operação no banco de dados. Funciona para reais e simulações (Paper Trading)."""
         trade_type = "PAPER" if is_paper else "REAL"
         query = """
-            INSERT INTO Trades (BinanceUID, Symbol, Action, Amount, Price, Timestamp, Type, PnL)
+            INSERT INTO Trades (BinanceUid, Symbol, Action, Amount, Price, Timestamp, Type, PnL)
             VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s)
         """
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(query, (binance_uid, symbol, action, amount, price, trade_type, pnl))
-                
+
     async def get_last_trade(self, binance_uid, symbol, is_paper):
         """Busca a última operação do usuário para podermos calcular o PnL teórico da próxima operação."""
         trade_type = "PAPER" if is_paper else "REAL"
         query = """
-            SELECT Action, Amount, Price, Timestamp 
+            SELECT Action, Amount, Price, Timestamp
             FROM Trades
-            WHERE BinanceUID = %s AND Symbol = %s AND Type = %s
+            WHERE BinanceUid = %s AND Symbol = %s AND Type = %s
             ORDER BY Timestamp DESC
             LIMIT 1
         """

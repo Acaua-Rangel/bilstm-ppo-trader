@@ -14,10 +14,14 @@ namespace AiSpotTrading.Backend.Repositories
             _context = context;
         }
 
-        public async Task<User?> GetUserByBinanceUidAsync(string binanceUid)
-        {
-            return await _context.Users.FirstOrDefaultAsync(u => u.BinanceUid == binanceUid);
-        }
+        public Task<User?> GetByIdAsync(int id)
+            => _context.Users.FirstOrDefaultAsync(u => u.Id == id);
+
+        public Task<User?> GetByGoogleSubAsync(string googleSub)
+            => _context.Users.FirstOrDefaultAsync(u => u.GoogleSub == googleSub);
+
+        public Task<User?> GetUserByBinanceUidAsync(string binanceUid)
+            => _context.Users.FirstOrDefaultAsync(u => u.BinanceUid == binanceUid);
 
         public async Task<User> CreateUserAsync(User user)
         {

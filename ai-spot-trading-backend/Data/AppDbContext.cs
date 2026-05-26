@@ -16,8 +16,14 @@ namespace AiSpotTrading.Backend.Data
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
             base.OnModelCreating(modelBuilder);
-            
-            // Decimal precision
+
+            modelBuilder.Entity<User>()
+                .HasIndex(u => u.GoogleSub)
+                .IsUnique();
+
+            modelBuilder.Entity<ExchangeAccount>()
+                .HasIndex(a => a.UserId);
+
             modelBuilder.Entity<ExchangeAccount>()
                 .Property(e => e.AllocatedBalance)
                 .HasPrecision(18, 8);

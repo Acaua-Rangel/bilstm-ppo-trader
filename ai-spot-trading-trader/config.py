@@ -20,8 +20,12 @@ class Config:
         # Busca o ca.pem na mesma pasta do config.py
         MYSQL_SSL_CA = os.getenv("MYSQL_SSL_CA", os.path.abspath(os.path.join(os.path.dirname(__file__), "ca.pem")))
 
+    # Chave de criptografia AES-256-GCM compartilhada com o backend (base64 de 32 bytes)
+    ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "")
+
     # Trading config
-    TRADING_SYMBOL = "BTC/USDT"
+    TRADING_SYMBOL = "BTC/USDT"   # Bybit — coleta de dados e paper trading
+    BINANCE_SYMBOL = "BTC/FDUSD"  # Binance — execução de trades reais
     TIMEFRAME = "15m"
     HORIZON = 4
     NUM_FEATURES = 20

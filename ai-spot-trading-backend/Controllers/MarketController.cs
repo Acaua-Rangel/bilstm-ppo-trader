@@ -11,57 +11,77 @@ namespace AiSpotTrading.Backend.Controllers
     public class MarketController : ControllerBase
     {
         private static readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(10) };
+
         private static readonly string[] _hosts =
         {
-            "api.binance.com",
-            "api1.binance.com",
-            "api2.binance.com",
-            "api3.binance.com",
-            "api4.binance.com",
+            "api.bybit.com",
+            "api.bytick.com",
         };
 
-        private static readonly HashSet<string> _allowedIntervals = new()
+        // Bybit uses numeric minutes for intraday and letters for daily+
+        private static readonly Dictionary<string, string> _intervalMap = new()
         {
-            "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"
+            ["1m"]  = "1",
+            ["3m"]  = "3",
+            ["5m"]  = "5",
+            ["15m"] = "15",
+            ["30m"] = "30",
+            ["1h"]  = "60",
+            ["2h"]  = "120",
+            ["4h"]  = "240",
+            ["6h"]  = "360",
+            ["8h"]  = "480",
+            ["12h"] = "720",
+            ["1d"]  = "D",
         };
 
         private readonly ILogger<MarketController> _logger;
 
         public MarketController(ILogger<MarketController> logger) => _logger = logger;
 
-        // GET /api/market/klines?symbol=BTCFDUSD&interval=15m&limit=96
+        // GET /api/market/klines?symbol=BTCUSDT&interval=15m&limit=96
         [HttpGet("klines")]
         public async Task<IActionResult> Klines(
-            [FromQuery] string symbol = "BTCFDUSD",
+            [FromQuery] string symbol = "BTCUSDT",
             [FromQuery] string interval = "15m",
             [FromQuery] int limit = 96)
         {
             symbol = symbol.ToUpperInvariant();
-            if (!_allowedIntervals.Contains(interval)) return BadRequest(new { error = "invalid interval" });
+            if (!_intervalMap.TryGetValue(interval, out var bybitInterval))
+                return BadRequest(new { error = "invalid interval" });
             if (limit <= 0 || limit > 1000) limit = 96;
 
             foreach (var host in _hosts)
             {
-                var url = $"https://{host}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}";
+                var url = $"https://{host}/v5/market/kline?category=spot&symbol={symbol}&interval={bybitInterval}&limit={limit}";
                 try
                 {
                     using var resp = await _http.GetAsync(url);
                     if (!resp.IsSuccessStatusCode) continue;
                     var raw = await resp.Content.ReadAsStringAsync();
 
-                    // Binance returns array of arrays:
-                    // [ openTime, open, high, low, close, volume, closeTime, ... ]
+                    // Bybit returns: { retCode, result: { list: [[startTime, open, high, low, close, volume, turnover], ...] } }
+                    // list is ordered newest-first — reverse to chronological order.
                     using var doc = JsonDocument.Parse(raw);
-                    var klines = new List<KlineDto>(doc.RootElement.GetArrayLength());
-                    foreach (var k in doc.RootElement.EnumerateArray())
+                    if (doc.RootElement.GetProperty("retCode").GetInt32() != 0) continue;
+
+                    var list = doc.RootElement
+                        .GetProperty("result")
+                        .GetProperty("list")
+                        .EnumerateArray()
+                        .Reverse()
+                        .ToList();
+
+                    var klines = new List<KlineDto>(list.Count);
+                    foreach (var k in list)
                     {
                         klines.Add(new KlineDto
                         {
-                            Time = k[0].GetInt64() / 1000,
-                            Open = decimal.Parse(k[1].GetString()!, System.Globalization.CultureInfo.InvariantCulture),
-                            High = decimal.Parse(k[2].GetString()!, System.Globalization.CultureInfo.InvariantCulture),
-                            Low = decimal.Parse(k[3].GetString()!, System.Globalization.CultureInfo.InvariantCulture),
-                            Close = decimal.Parse(k[4].GetString()!, System.Globalization.CultureInfo.InvariantCulture),
+                            Time   = long.Parse(k[0].GetString()!) / 1000,
+                            Open   = decimal.Parse(k[1].GetString()!, System.Globalization.CultureInfo.InvariantCulture),
+                            High   = decimal.Parse(k[2].GetString()!, System.Globalization.CultureInfo.InvariantCulture),
+                            Low    = decimal.Parse(k[3].GetString()!, System.Globalization.CultureInfo.InvariantCulture),
+                            Close  = decimal.Parse(k[4].GetString()!, System.Globalization.CultureInfo.InvariantCulture),
                             Volume = decimal.Parse(k[5].GetString()!, System.Globalization.CultureInfo.InvariantCulture),
                         });
                     }
@@ -73,7 +93,7 @@ namespace AiSpotTrading.Backend.Controllers
                 }
             }
 
-            return StatusCode(502, new { error = "Todos os hosts da Binance falharam." });
+            return StatusCode(502, new { error = "Todos os hosts do Bybit falharam." });
         }
     }
 }

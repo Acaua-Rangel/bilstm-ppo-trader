@@ -3,8 +3,55 @@ import numpy as np
 import logging
 from config import Config
 import tensorflow as tf
+import keras
+from keras import layers
 
 logger = logging.getLogger(__name__)
+
+@keras.saving.register_keras_serializable(package='custom')
+def slice_last_step(z):
+    return z[:, -1, :]
+
+@keras.saving.register_keras_serializable(package='custom')
+class MultiHeadAttentionBlock(layers.Layer):
+    """Multi-Head Attention + Add & Norm (Transformer encoder block, no FFN)."""
+
+    def __init__(self, d_model: int, num_heads: int = 4, dropout: float = 0.1, **kwargs):
+        super().__init__(**kwargs)
+        self.d_model   = d_model
+        self.num_heads = num_heads
+        self.drop_rate = dropout
+
+    def build(self, input_shape):
+        feat_dim = input_shape[-1]
+        self.needs_projection = (feat_dim != self.d_model)
+        if self.needs_projection:
+            self.input_proj = layers.Dense(self.d_model, name="mha_input_proj")
+
+        self.mha = layers.MultiHeadAttention(
+            num_heads=self.num_heads,
+            key_dim=self.d_model // self.num_heads,
+            dropout=self.drop_rate,
+            name="mha_core",
+        )
+        self.layernorm = layers.LayerNormalization(name="mha_layernorm")
+        self.dropout   = layers.Dropout(self.drop_rate)
+        super().build(input_shape)
+
+    def call(self, x, training=None):
+        residual = self.input_proj(x) if self.needs_projection else x
+        attn_out = self.mha(query=x, value=x, key=x, training=training)
+        attn_out = self.dropout(attn_out, training=training)
+        return self.layernorm(residual + attn_out)
+
+    def get_config(self):
+        cfg = super().get_config()
+        cfg.update({
+            "d_model":   self.d_model,
+            "num_heads":  self.num_heads,
+            "dropout":    self.drop_rate,
+        })
+        return cfg
 
 class ModelLoader:
     def __init__(self):
@@ -18,7 +65,14 @@ class ModelLoader:
             if not os.path.exists(path):
                 continue
             try:
-                self.forecaster = tf.keras.models.load_model(path)
+                from keras.utils import custom_object_scope
+                with custom_object_scope({
+                    "MultiHeadAttentionBlock": MultiHeadAttentionBlock, 
+                    "custom>MultiHeadAttentionBlock": MultiHeadAttentionBlock,
+                    "slice_last_step": slice_last_step,
+                    "custom>slice_last_step": slice_last_step
+                }):
+                    self.forecaster = keras.models.load_model(path, compile=False)
                 logger.info("Forecaster carregado de %s", path)
                 break
             except Exception as e:
@@ -32,7 +86,7 @@ class ModelLoader:
             if not os.path.exists(path):
                 continue
             try:
-                self.policy = tf.keras.models.load_model(path)
+                self.policy = keras.models.load_model(path, compile=False)
                 logger.info("Policy carregada de %s", path)
                 break
             except Exception as e:
@@ -93,9 +147,9 @@ class ModelLoader:
             action_probs_in = self.policy.predict(state_in_tensor, verbose=0)[0]
             action_in = np.argmax(action_probs_in)
             
-            logger.debug("Probabilidades FLAT: HOLD=%.2f%%, BUY=%.2f%%, SELL=%.2f%%", 
+            logger.info("Probabilidades FLAT: HOLD=%.2f%%, BUY=%.2f%%, SELL=%.2f%%", 
                         action_probs_flat[0]*100, action_probs_flat[1]*100, action_probs_flat[2]*100)
-            logger.debug("Probabilidades IN: HOLD=%.2f%%, BUY=%.2f%%, SELL=%.2f%%", 
+            logger.info("Probabilidades IN: HOLD=%.2f%%, BUY=%.2f%%, SELL=%.2f%%", 
                         action_probs_in[0]*100, action_probs_in[1]*100, action_probs_in[2]*100)
             
             # 0=HOLD, 1=BUY, 2=SELL

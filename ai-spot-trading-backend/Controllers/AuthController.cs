@@ -88,9 +88,17 @@ namespace AiSpotTrading.Backend.Controllers
         [HttpGet("me")]
         public async Task<IActionResult> Me()
         {
-            var user = await GetCurrentUserAsync();
-            if (user == null) return Unauthorized();
-            return Ok(await BuildMeAsync(user));
+            try
+            {
+                var user = await GetCurrentUserAsync();
+                if (user == null) return Unauthorized();
+                return Ok(await BuildMeAsync(user));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Erro no /api/auth/me");
+                return StatusCode(500, new { error = "Erro interno", details = ex.Message });
+            }
         }
 
         [Authorize]
@@ -108,7 +116,7 @@ namespace AiSpotTrading.Backend.Controllers
             {
                 HttpOnly = true,
                 Secure = secure,
-                SameSite = SameSiteMode.Lax,
+                SameSite = secure ? SameSiteMode.None : SameSiteMode.Lax,
                 Expires = DateTimeOffset.UtcNow.AddDays(7),
                 Path = "/"
             });

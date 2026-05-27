@@ -21,7 +21,7 @@ class Config:
         MYSQL_SSL_CA = os.getenv("MYSQL_SSL_CA", os.path.abspath(os.path.join(os.path.dirname(__file__), "ca.pem")))
 
     # Trading config
-    TRADING_SYMBOL = "BTC/FDUSD"
+    TRADING_SYMBOL = "BTC/USDT"
     TIMEFRAME = "15m"
     HORIZON = 4
     NUM_FEATURES = 20

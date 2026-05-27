@@ -1,4 +1,5 @@
 using System.Text;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
@@ -74,6 +75,21 @@ builder.Services
                 if (ctx.Request.Cookies.TryGetValue("ast_session", out var token))
                     ctx.Token = token;
                 return Task.CompletedTask;
+            },
+            OnAuthenticationFailed = ctx =>
+            {
+                var logger = ctx.HttpContext.RequestServices
+                    .GetRequiredService<ILogger<Program>>();
+                logger.LogWarning("JWT auth failed: {Error}", ctx.Exception.Message);
+                return Task.CompletedTask;
+            },
+            OnChallenge = ctx =>
+            {
+                var logger = ctx.HttpContext.RequestServices
+                    .GetRequiredService<ILogger<Program>>();
+                var hasCookie = ctx.Request.Cookies.ContainsKey("ast_session");
+                logger.LogWarning("JWT challenge on {Path} — cookie present: {HasCookie}", ctx.Request.Path, hasCookie);
+                return Task.CompletedTask;
             }
         };
     });
@@ -126,6 +142,11 @@ using (var scope = app.Services.CreateScope())
         throw;
     }
 }
+
+app.UseForwardedHeaders(new ForwardedHeadersOptions
+{
+    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
+});
 
 if (app.Environment.IsDevelopment())
 {

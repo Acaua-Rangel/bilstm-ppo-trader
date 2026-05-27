@@ -54,14 +54,16 @@ async def main_loop():
                 logger.warning("Falha na coleta de dados. Pulando ciclo.")
                 continue
                 
-            features, current_price, current_adx = result
+            features, current_price, candle_info = result
+            current_adx = candle_info.get('adx')
 
             # 3. Predição do modelo ML
-            global_action = model_loader.predict(features)
+            global_action = model_loader.predict(features, candle_info)
             logger.info(f"Sinal do Modelo: {global_action} | Preço: {current_price} | ADX: {current_adx}")
 
             # 4. Motor Assíncrono (Distribui para todas as contas)
             await executor.execute_signals(global_action, current_price, current_adx)
+
             
             logger.info("== Ciclo de Inferência Concluído ==")
             
@@ -72,4 +74,8 @@ async def main_loop():
         await db.close()
 
 if __name__ == "__main__":
+    import sys
+    if sys.platform == 'win32':
+        # Necessário no Windows para evitar WinError 87 ao fazer conexões SSL assíncronas com o aiomysql
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main_loop())

@@ -348,11 +348,26 @@ class DataProcessor:
             ])
 
         X = np.array([rows], dtype=np.float32)
-        # Retorna preço atual + ADX corrente para registro/visualização das decisões.
+        
         current_close = closes[w_end - 1]
         current_adx = adx_all[w_end - 1]
         if np.isnan(current_adx):
             current_adx = None
         else:
             current_adx = float(current_adx)
-        return X, current_close, current_adx
+
+        # Calculo de volatilidade do último candle (20 periods)
+        vol_start = max(1, i - 20)
+        rets = (closes[vol_start:i+1] - closes[vol_start-1:i]) / closes[vol_start-1:i]
+        current_vol = np.std(rets) if len(rets) > 0 else 0.0
+
+        candle_info = {
+            'open': opens[i],
+            'high': highs[i],
+            'low': lows[i],
+            'close': closes[i],
+            'volatility': current_vol,
+            'adx': current_adx
+        }
+
+        return X, current_close, candle_info

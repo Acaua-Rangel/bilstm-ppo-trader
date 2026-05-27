@@ -53,11 +53,21 @@ class Database:
 
     async def _ensure_database_exists(self):
         """Conecta ao servidor MySQL sem selecionar DB e garante que o schema exista."""
+        import ssl
+        import os
+        ssl_ctx = None
+        if os.path.exists(Config.MYSQL_SSL_CA):
+            ssl_ctx = ssl.create_default_context(cafile=Config.MYSQL_SSL_CA)
+            ssl_ctx.check_hostname = False
+        else:
+            logger.warning("Certificado CA %s não encontrado. Conectando sem SSL forçado.", Config.MYSQL_SSL_CA)
+            
         conn = await aiomysql.connect(
             host=Config.MYSQL_HOST,
             port=Config.MYSQL_PORT,
             user=Config.MYSQL_USER,
             password=Config.MYSQL_PASSWORD,
+            ssl=ssl_ctx,
             autocommit=True,
         )
         try:
@@ -85,16 +95,24 @@ class Database:
 
     async def connect(self):
         await self._ensure_database_exists()
+        import ssl
+        import os
+        ssl_ctx = None
+        if os.path.exists(Config.MYSQL_SSL_CA):
+            ssl_ctx = ssl.create_default_context(cafile=Config.MYSQL_SSL_CA)
+            ssl_ctx.check_hostname = False
+            
         self.pool = await aiomysql.create_pool(
             host=Config.MYSQL_HOST,
             port=Config.MYSQL_PORT,
             user=Config.MYSQL_USER,
             password=Config.MYSQL_PASSWORD,
             db=Config.MYSQL_DB,
+            ssl=ssl_ctx,
             autocommit=True
         )
         await self._ensure_tables_exist()
-        logger.info("Connected to MySQL database.")
+        logger.info("Connected to MySQL database (SSL: %s).", "Yes" if ssl_ctx else "No")
 
     async def get_active_users(self):
         """Busca contas de usuários elegíveis para trade, separando reais de paper trading."""

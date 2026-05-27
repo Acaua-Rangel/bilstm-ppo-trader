@@ -10,6 +10,8 @@ class Config:
     MYSQL_USER = os.getenv("MYSQL_USER", "root")
     MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
     MYSQL_DB = os.getenv("MYSQL_DB", "ai_spot_trading")
+    # Busca o ca.pem um nível acima (na raiz do repositório) por padrão
+    MYSQL_SSL_CA = os.getenv("MYSQL_SSL_CA", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "ca.pem")))
 
     # Trading config
     TRADING_SYMBOL = "BTC/FDUSD"
@@ -35,5 +37,19 @@ class Config:
     # (ou para o primeiro caminho da lista se nada existir, só pra log dizer onde procurou).
     MODEL_PATH = next(
         (p for p in MODEL_CANDIDATES if os.path.exists(p)),
-        MODEL_CANDIDATES[0],
+        MODEL_CANDIDATES[0] if MODEL_CANDIDATES else "",
     )
+
+    # Caminhos possíveis para o modelo PPO Actor (policy)
+    POLICY_CANDIDATES = [
+        os.getenv("POLICY_PATH") if os.getenv("POLICY_PATH") else None,
+        os.path.join(_MODELS_DIR, "policy.keras"),
+        os.path.join(_MODELS_DIR, "ppo", "policy", "model.keras"),
+    ]
+    POLICY_CANDIDATES = [p for p in POLICY_CANDIDATES if p]
+
+    POLICY_PATH = next(
+        (p for p in POLICY_CANDIDATES if os.path.exists(p)),
+        POLICY_CANDIDATES[0] if POLICY_CANDIDATES else "",
+    )
+

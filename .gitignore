@@ -4,10 +4,11 @@ node_modules
 .runtime/
 dist/
 
-models/
 .venv
 __pycache__
 
 # .NET secrets (contém Google ClientId, JWT secret, Encryption key)
 appsettings.Development.json
 appsettings.*.Local.json
+ai-spot-trading-backend/bin
+ai-spot-trading-backend/obj

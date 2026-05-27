@@ -51,9 +51,13 @@ namespace AiSpotTrading.Backend.Controllers
                 return BadRequest(new { error = "invalid interval" });
             if (limit <= 0 || limit > 1000) limit = 96;
 
+            // Bybit não tem pares FDUSD (stablecoin exclusiva da Binance).
+            // BTCFDUSD ≈ BTCUSDT em preço — mapeamos para a Bybit consultar corretamente.
+            var bybitSymbol = symbol.Replace("FDUSD", "USDT");
+
             foreach (var host in _hosts)
             {
-                var url = $"https://{host}/v5/market/kline?category=spot&symbol={symbol}&interval={bybitInterval}&limit={limit}";
+                var url = $"https://{host}/v5/market/kline?category=spot&symbol={bybitSymbol}&interval={bybitInterval}&limit={limit}";
                 try
                 {
                     using var resp = await _http.GetAsync(url);

@@ -1,5 +1,12 @@
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:5000';
 
+const TOKEN_KEY = 'ast_token';
+export const tokenStore = {
+  get: () => sessionStorage.getItem(TOKEN_KEY),
+  set: (t: string) => sessionStorage.setItem(TOKEN_KEY, t),
+  clear: () => sessionStorage.removeItem(TOKEN_KEY),
+};
+
 export interface Me {
   id: number;
   email?: string | null;
@@ -34,10 +41,11 @@ export interface UpdateExchangeAccountInput {
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const token = tokenStore.get();
   const res = await fetch(`${API_BASE}${path}`, {
-    credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(init.headers ?? {}),
     },
     ...init,
@@ -57,12 +65,21 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
-  googleLogin: (idToken: string) =>
-    request<Me>('/api/auth/google', { method: 'POST', body: JSON.stringify({ idToken }) }),
+  googleLogin: async (idToken: string): Promise<Me> => {
+    const res = await request<{ token: string; user: Me }>('/api/auth/google', {
+      method: 'POST',
+      body: JSON.stringify({ idToken }),
+    });
+    tokenStore.set(res.token);
+    return res.user;
+  },
 
   me: () => request<Me>('/api/auth/me'),
 
-  logout: () => request<void>('/api/auth/logout', { method: 'POST' }),
+  logout: () => {
+    tokenStore.clear();
+    return request<void>('/api/auth/logout', { method: 'POST' }).catch(() => {});
+  },
 
   listExchangeAccounts: () =>
     request<ExchangeAccountResponse[]>('/api/exchange-accounts'),

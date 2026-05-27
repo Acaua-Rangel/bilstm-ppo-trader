@@ -79,9 +79,8 @@ namespace AiSpotTrading.Backend.Controllers
             }
 
             var token = _jwt.CreateToken(user);
-            SetSessionCookie(token);
-
-            return Ok(await BuildMeAsync(user));
+            var me = await BuildMeAsync(user);
+            return Ok(new { token, user = me });
         }
 
         [Authorize]
@@ -107,19 +106,6 @@ namespace AiSpotTrading.Backend.Controllers
         {
             Response.Cookies.Delete(CookieName);
             return NoContent();
-        }
-
-        private void SetSessionCookie(string token)
-        {
-            var secure = !string.Equals(_config["Cookie:Secure"], "false", StringComparison.OrdinalIgnoreCase);
-            Response.Cookies.Append(CookieName, token, new CookieOptions
-            {
-                HttpOnly = true,
-                Secure = secure,
-                SameSite = secure ? SameSiteMode.None : SameSiteMode.Lax,
-                Expires = DateTimeOffset.UtcNow.AddDays(7),
-                Path = "/"
-            });
         }
 
         private async Task<User?> GetCurrentUserAsync()

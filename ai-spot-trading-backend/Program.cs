@@ -80,13 +80,10 @@ builder.Services
 
 builder.Services.AddAuthorization();
 
-// CORS — credentials habilitado para o cookie do frontend Vite.
-var frontendOrigins = builder.Configuration.GetSection("Cors:Origins").Get<string[]>()
-    ?? new[] { "http://localhost:5173", "http://localhost:3000" };
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowFrontend", policy =>
-        policy.WithOrigins(frontendOrigins)
+        policy.SetIsOriginAllowed(_ => true)
               .AllowAnyHeader()
               .AllowAnyMethod()
               .AllowCredentials());

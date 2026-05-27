@@ -63,12 +63,12 @@ export const LandingPage = () => {
           </p>
 
           <div className="hero-text mb-4">
-            <div className="animated-border-btn cursor-pointer" onClick={handleCTA}>
-              <div className="btn-inner text-lg px-8 py-4">
+            <div className="cta-btn cursor-pointer" onClick={handleCTA}>
+              <div className="cta-btn-inner text-lg px-8 py-4">
                 <span className="font-bold text-white uppercase tracking-wide">
                   {isAuthenticated ? 'Abrir Dashboard' : 'Começar agora'}
                 </span>
-                <ArrowRight className="text-primary" />
+                <ArrowRight className="text-white" />
               </div>
             </div>
           </div>
@@ -215,12 +215,12 @@ export const LandingPage = () => {
             Começa em modo Paper Trading (capital fictício) — só vira capital real quando você decidir.
           </p>
           <div className="inline-block">
-            <div className="animated-border-btn cursor-pointer" onClick={handleCTA}>
-              <div className="btn-inner text-lg px-8 py-4">
+            <div className="cta-btn cursor-pointer" onClick={handleCTA}>
+              <div className="cta-btn-inner text-lg px-8 py-4">
                 <span className="font-bold text-white uppercase tracking-wide">
                   {isAuthenticated ? 'Abrir Dashboard' : 'Entrar com Google'}
                 </span>
-                <TrendingUp className="text-primary" />
+                <TrendingUp className="text-white" />
               </div>
             </div>
           </div>

@@ -20,8 +20,8 @@ export interface ExchangeAccountResponse {
 }
 
 export interface CreateExchangeAccountInput {
-  apiKey: string;
-  apiSecret: string;
+  apiKey?: string;
+  apiSecret?: string;
   binanceUid?: string;
   allocatedBalance: number;
   isPaperTrading: boolean;

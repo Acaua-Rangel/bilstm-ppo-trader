@@ -69,10 +69,10 @@ export const ConnectBinance = () => {
               <Field label="API Key">
                 <input
                   type="text"
-                  required
+                  required={!isPaperTrading}
                   value={apiKey}
                   onChange={(e) => setApiKey(e.target.value)}
-                  placeholder="cole sua API key"
+                  placeholder={isPaperTrading ? '(opcional no Paper Trading)' : 'cole sua API key'}
                   className="form-input"
                   autoComplete="off"
                 />
@@ -82,10 +82,10 @@ export const ConnectBinance = () => {
                 <div className="relative">
                   <input
                     type={showSecret ? 'text' : 'password'}
-                    required
+                    required={!isPaperTrading}
                     value={apiSecret}
                     onChange={(e) => setApiSecret(e.target.value)}
-                    placeholder="cole sua secret key"
+                    placeholder={isPaperTrading ? '(opcional no Paper Trading)' : 'cole sua secret key'}
                     className="form-input pr-10"
                     autoComplete="off"
                   />

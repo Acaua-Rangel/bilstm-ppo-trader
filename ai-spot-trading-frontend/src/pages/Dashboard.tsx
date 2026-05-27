@@ -126,7 +126,7 @@ export const Dashboard = () => {
   const handleSelectMode = (target: Mode) => {
     if (target === mode || savingMode) return;
     if (target === 'invest') {
-      if (!account) {
+      if (!account || !account.apiKeyMasked) {
         setNoKeyModal(true);
         return;
       }

@@ -16,9 +16,11 @@ namespace AiSpotTrading.Backend.Validators
         public CreateExchangeAccountDtoValidator()
         {
             RuleFor(x => x.ApiKey).NotEmpty().MinimumLength(20)
-                .WithMessage("API Key inválida.");
+                .WithMessage("API Key inválida.")
+                .When(x => !x.IsPaperTrading);
             RuleFor(x => x.ApiSecret).NotEmpty().MinimumLength(20)
-                .WithMessage("API Secret inválido.");
+                .WithMessage("API Secret inválido.")
+                .When(x => !x.IsPaperTrading);
             RuleFor(x => x.AllocatedBalance).GreaterThanOrEqualTo(0)
                 .WithMessage("O saldo alocado não pode ser negativo.");
         }

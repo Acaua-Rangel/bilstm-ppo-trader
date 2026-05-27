@@ -43,12 +43,17 @@ namespace AiSpotTrading.Backend.Controllers
             var userId = GetUserId();
             if (userId == null) return Unauthorized();
 
+            var hasKeys = !string.IsNullOrWhiteSpace(dto.ApiKey) && !string.IsNullOrWhiteSpace(dto.ApiSecret);
+
+            if (!dto.IsPaperTrading && !hasKeys)
+                return BadRequest(new { error = "API Key e Secret são obrigatórios para operar com dinheiro real." });
+
             var account = new ExchangeAccount
             {
                 UserId = userId.Value,
                 BinanceUid = dto.BinanceUid ?? string.Empty,
-                EncryptedApiKey = _crypto.Encrypt(dto.ApiKey),
-                EncryptedApiSecret = _crypto.Encrypt(dto.ApiSecret),
+                EncryptedApiKey = hasKeys ? _crypto.Encrypt(dto.ApiKey) : string.Empty,
+                EncryptedApiSecret = hasKeys ? _crypto.Encrypt(dto.ApiSecret) : string.Empty,
                 AllocatedBalance = dto.AllocatedBalance,
                 IsPaperTrading = dto.IsPaperTrading,
                 IsActive = true
@@ -76,6 +81,9 @@ namespace AiSpotTrading.Backend.Controllers
 
             var account = await _accountRepo.GetByIdAsync(id);
             if (account == null || account.UserId != userId.Value) return NotFound();
+
+            if (!dto.IsPaperTrading && string.IsNullOrEmpty(account.EncryptedApiKey))
+                return BadRequest(new { error = "Cadastre suas API keys da Binance antes de operar com dinheiro real." });
 
             account.AllocatedBalance = dto.AllocatedBalance;
             account.IsPaperTrading = dto.IsPaperTrading;
@@ -108,16 +116,23 @@ namespace AiSpotTrading.Backend.Controllers
         private ExchangeAccountResponseDto ToDto(ExchangeAccount a)
         {
             string masked;
-            try
+            if (string.IsNullOrEmpty(a.EncryptedApiKey))
             {
-                var plain = _crypto.Decrypt(a.EncryptedApiKey);
-                masked = plain.Length <= 8
-                    ? new string('•', plain.Length)
-                    : $"{plain[..4]}••••{plain[^4..]}";
+                masked = string.Empty;
             }
-            catch
+            else
             {
-                masked = "••••••••";
+                try
+                {
+                    var plain = _crypto.Decrypt(a.EncryptedApiKey);
+                    masked = plain.Length <= 8
+                        ? new string('•', plain.Length)
+                        : $"{plain[..4]}••••{plain[^4..]}";
+                }
+                catch
+                {
+                    masked = "••••••••";
+                }
             }
 
             return new ExchangeAccountResponseDto

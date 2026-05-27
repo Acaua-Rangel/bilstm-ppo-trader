@@ -31,10 +31,20 @@ _TABLE_DDL = {
             `Timestamp` DATETIME(6) NOT NULL,
             `Type` VARCHAR(20) NOT NULL,
             `PnL` DECIMAL(18,8) NOT NULL,
-            PRIMARY KEY (`Id`)
+            `Adx` DECIMAL(8,4) NULL,
+            PRIMARY KEY (`Id`),
+            INDEX `idx_trades_uid_ts` (`BinanceUid`, `Timestamp`)
         ) CHARACTER SET=utf8mb4;
     """,
 }
+
+# Garante que a coluna Adx exista mesmo em bancos criados antes dessa versão.
+_TABLE_MIGRATIONS = [
+    """
+    ALTER TABLE `Trades`
+    ADD COLUMN IF NOT EXISTS `Adx` DECIMAL(8,4) NULL
+    """,
+]
 
 
 class Database:
@@ -67,6 +77,11 @@ class Database:
                 for name, ddl in _TABLE_DDL.items():
                     await cur.execute(ddl)
                     logger.info("Tabela '%s' verificada/criada.", name)
+                for stmt in _TABLE_MIGRATIONS:
+                    try:
+                        await cur.execute(stmt)
+                    except Exception as exc:
+                        logger.warning("Migration ignorada: %s", exc)
 
     async def connect(self):
         await self._ensure_database_exists()
@@ -95,24 +110,26 @@ class Database:
                 await cur.execute(query)
                 return await cur.fetchall()
 
-    async def save_trade(self, binance_uid, symbol, action, amount, price, is_paper, pnl=0.0):
-        """Salva a operação no banco de dados. Funciona para reais e simulações (Paper Trading)."""
+    async def save_trade(self, binance_uid, symbol, action, amount, price, is_paper, pnl=0.0, adx=None):
+        """Salva a operação/decisão no banco. BUY/SELL movimentam posição; HOLD apenas registra a decisão do modelo."""
         trade_type = "PAPER" if is_paper else "REAL"
+        # UTC_TIMESTAMP(6) garante que o registro use UTC, independente do fuso do servidor MySQL.
+        # O backend interpreta este DATETIME como UTC ao serializar para o frontend.
         query = """
-            INSERT INTO Trades (BinanceUid, Symbol, Action, Amount, Price, Timestamp, Type, PnL)
-            VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s)
+            INSERT INTO Trades (BinanceUid, Symbol, Action, Amount, Price, Timestamp, Type, PnL, Adx)
+            VALUES (%s, %s, %s, %s, %s, UTC_TIMESTAMP(6), %s, %s, %s)
         """
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(query, (binance_uid, symbol, action, amount, price, trade_type, pnl))
+                await cur.execute(query, (binance_uid, symbol, action, amount, price, trade_type, pnl, adx))
 
     async def get_last_trade(self, binance_uid, symbol, is_paper):
-        """Busca a última operação do usuário para podermos calcular o PnL teórico da próxima operação."""
+        """Busca a última operação real (BUY/SELL) do usuário para calcular PnL teórico. HOLDs são ignorados."""
         trade_type = "PAPER" if is_paper else "REAL"
         query = """
             SELECT Action, Amount, Price, Timestamp
             FROM Trades
-            WHERE BinanceUid = %s AND Symbol = %s AND Type = %s
+            WHERE BinanceUid = %s AND Symbol = %s AND Type = %s AND Action IN ('BUY','SELL')
             ORDER BY Timestamp DESC
             LIMIT 1
         """

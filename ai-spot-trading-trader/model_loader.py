@@ -12,15 +12,21 @@ class ModelLoader:
 
     def _load_model(self):
         import tensorflow as tf
-        if not os.path.exists(Config.MODEL_PATH):
-            logger.warning(f"Modelo não encontrado em {Config.MODEL_PATH}. A inferência retornará HOLD por padrão.")
-            return
-        
-        try:
-            self.model = tf.keras.models.load_model(Config.MODEL_PATH)
-            logger.info("Modelo de Machine Learning carregado com sucesso.")
-        except Exception as e:
-            logger.error(f"Erro ao carregar o modelo: {e}")
+
+        for path in Config.MODEL_CANDIDATES:
+            if not os.path.exists(path):
+                continue
+            try:
+                self.model = tf.keras.models.load_model(path)
+                logger.info("Modelo carregado de %s", path)
+                return
+            except Exception as e:
+                logger.error("Falha ao carregar modelo em %s: %s", path, e)
+
+        logger.warning(
+            "Nenhum modelo encontrado. Locais testados: %s. A inferência retornará HOLD.",
+            Config.MODEL_CANDIDATES,
+        )
 
     def predict(self, features: np.ndarray) -> str:
         """

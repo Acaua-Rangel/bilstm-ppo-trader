@@ -230,7 +230,7 @@ Multiple CUDA versions coexist in separate `v11.x` / `v12.x` folders — the wra
 
 | Variable | Description | Example |
 |---|---|---|
-| `TRADING_SYMBOL` | Trading pair | `BTC/USDT` |
+| `TRADING_SYMBOL` | Trading pair | `BTC/FDUSD` |
 | `TRADING_TIMEFRAME` | Candle interval | `15m` |
 | `INITIAL_CAPITAL_USD` | Starting capital (paper) | `1000` |
 | `MAX_POSITION_RISK_PCT` | Fraction of cash at risk per trade | `0.1` |

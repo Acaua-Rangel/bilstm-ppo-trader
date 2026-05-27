@@ -9,78 +9,70 @@ class TradeExecutor:
     def __init__(self, db: Database):
         self.db = db
 
-    async def execute_signals(self, global_action: str, current_price: float):
+    async def execute_signals(self, global_action: str, current_price: float, adx: float | None = None):
         """
-        Recebe o sinal global (BUY/SELL/HOLD) e o distribui para todos os usuários elegíveis de forma concorrente.
+        Recebe o sinal global (BUY/SELL/HOLD) e o distribui para todos os usuários elegíveis.
+        Todas as decisões (incluindo HOLD) são registradas no banco para gerar histórico no dashboard.
         """
-        if global_action == "HOLD":
-            logger.info("Ação global é HOLD. Nenhuma operação será executada neste ciclo.")
-            return
-
         users = await self.db.get_active_users()
         if not users:
-            logger.info("Nenhum usuário ativo para executar trades no momento.")
+            logger.info("Nenhum usuário ativo. Sinal '%s' não foi registrado.", global_action)
             return
 
-        logger.info(f"Distribuindo sinal de {global_action} para {len(users)} usuários.")
-        
-        # Prepara a execução assíncrona para todos os usuários ao mesmo tempo
-        tasks = []
-        for user in users:
-            tasks.append(self._process_user_trade(user, global_action, current_price))
-            
-        # Executa paralelamente
+        logger.info("Distribuindo sinal '%s' (price=%s, adx=%s) para %d usuários.",
+                    global_action, current_price, adx, len(users))
+
+        tasks = [self._process_user_trade(u, global_action, current_price, adx) for u in users]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Loga erros eventuais
+
         for i, res in enumerate(results):
             if isinstance(res, Exception):
-                logger.error(f"Erro ao processar usuário {users[i]['BinanceUID']}: {res}")
+                logger.error("Erro ao processar usuário %s: %s", users[i]['BinanceUID'], res)
 
-    async def _process_user_trade(self, user: dict, global_action: str, current_price: float):
+    async def _process_user_trade(self, user: dict, global_action: str, current_price: float, adx: float | None):
         binance_uid = user['BinanceUID']
         is_paper = bool(user['IsPaperTrading'])
         allocated_balance = float(user['AllocatedBalance'])
-        
-        # Busca o estado atual do usuário
+
         last_trade = await self.db.get_last_trade(binance_uid, Config.TRADING_SYMBOL, is_paper)
-        current_position = last_trade['Action'] if last_trade else "SELL" # Padrão sem posição (apenas Fiat)
+        current_position = last_trade['Action'] if last_trade else "SELL"
+
+        if global_action == "HOLD":
+            # HOLD não movimenta posição — só registra a decisão do modelo para o histórico.
+            await self.db.save_trade(
+                binance_uid, Config.TRADING_SYMBOL, "HOLD",
+                amount=0.0, price=current_price, is_paper=is_paper, pnl=0.0, adx=adx,
+            )
+            logger.debug("[%s] HOLD registrado para %s | adx=%s", "PAPER" if is_paper else "REAL", binance_uid, adx)
+            return
 
         if global_action == "BUY" and current_position != "BUY":
-            # Realizar Compra
             amount = allocated_balance / current_price
-            pnl = 0.0 # Sem PnL na compra, apenas registra o trade
-            
             if is_paper:
-                await self.db.save_trade(binance_uid, Config.TRADING_SYMBOL, "BUY", amount, current_price, True, pnl)
-                logger.info(f"[PAPER] BUY registrado para {binance_uid} | Qtd: {amount:.6f} a {current_price}")
+                await self.db.save_trade(binance_uid, Config.TRADING_SYMBOL, "BUY", amount, current_price, True, 0.0, adx)
+                logger.info("[PAPER] BUY %s | Qtd: %.6f a %.2f", binance_uid, amount, current_price)
             else:
                 self._mock_real_trade(binance_uid, "BUY", amount, current_price)
 
         elif global_action == "SELL" and current_position == "BUY":
-            # Realizar Venda
             buy_price = float(last_trade['Price'])
             amount = float(last_trade['Amount'])
-            
-            # PnL Teórico (Venda - Compra) * Quantidade
-            # Como a exchange isenta taxas para BTC/FDUSD, não descontamos spread de taxa aqui.
             pnl = (current_price - buy_price) * amount
-            
             if is_paper:
-                await self.db.save_trade(binance_uid, Config.TRADING_SYMBOL, "SELL", amount, current_price, True, pnl)
-                logger.info(f"[PAPER] SELL registrado para {binance_uid} | PnL: {pnl:.2f} FDUSD | Fechamento a {current_price}")
+                await self.db.save_trade(binance_uid, Config.TRADING_SYMBOL, "SELL", amount, current_price, True, pnl, adx)
+                logger.info("[PAPER] SELL %s | PnL: %.2f FDUSD | Fechamento a %.2f", binance_uid, pnl, current_price)
             else:
                 self._mock_real_trade(binance_uid, "SELL", amount, current_price)
 
+        else:
+            # Sinal incompatível com a posição (ex: BUY quando já está comprado). Apenas registra.
+            await self.db.save_trade(
+                binance_uid, Config.TRADING_SYMBOL, global_action,
+                amount=0.0, price=current_price, is_paper=is_paper, pnl=0.0, adx=adx,
+            )
+
     def _mock_real_trade(self, binance_uid: str, action: str, amount: float, price: float):
-        """
-        Pré-modelado para Execução Real. Conforme o requerimento do usuário:
-        "o sistema de aplicar dinheiro real não deve ser criado ainda, somente simular com dinheiro fictício"
-        """
-        logger.warning(f"[REAL TRADE BLOCKED] O sistema tentou executar um trade {action} real para {binance_uid}. "
-                       f"Operações reais estão bloqueadas durante o Beta. "
-                       f"Código de integração CCXT POST ONLY seria ativado aqui para zero taxas BTC/FDUSD.")
-        # Futura implementação: 
-        # 1. Descriptografar API Key e Secret
-        # 2. Inicializar ccxt.binance({apiKey, secret})
-        # 3. exchange.create_order('BTC/FDUSD', 'limit', action.lower(), amount, price, {'postOnly': True})
+        logger.warning(
+            "[REAL TRADE BLOCKED] tentativa %s %s para %s. Operações reais estão bloqueadas durante o Beta.",
+            action, amount, binance_uid,
+        )

@@ -1,3 +1,6 @@
+import asyncio
+import aiohttp
+from aiohttp.resolver import ThreadedResolver
 import ccxt.async_support as ccxt
 import numpy as np
 import pywt
@@ -6,40 +9,118 @@ from config import Config
 
 logger = logging.getLogger(__name__)
 
+# Mirrors oficiais da Binance — se o principal cair ou bloquear, tentamos os alternativos.
+_BINANCE_HOSTS = [
+    'api.binance.com',
+    'api1.binance.com',
+    'api2.binance.com',
+    'api3.binance.com',
+    'api4.binance.com',
+]
+_MAX_RETRIES_PER_HOST = 3
+
+
 class DataProcessor:
     def __init__(self):
-        self.exchange = ccxt.binance({'enableRateLimit': True})
-    
+        self._host_idx = 0
+        self.exchange = self._make_exchange(_BINANCE_HOSTS[0])
+
+    def _make_exchange(self, host: str):
+        ex = ccxt.binance({'enableRateLimit': True})
+        # Reescreve cada URL pública/privada para apontar para o host escolhido.
+        for key, url in list(ex.urls['api'].items()):
+            if isinstance(url, str) and 'api.binance.com' in url:
+                ex.urls['api'][key] = url.replace('api.binance.com', host)
+        # aiodns falha no Windows ("Could not contact DNS servers") em configs com múltiplas
+        # interfaces de rede (VPN, WSL, etc). Forçamos ThreadedResolver, que delega ao
+        # getaddrinfo do sistema — mesmo resolver que o PowerShell usa com sucesso.
+        connector = aiohttp.TCPConnector(resolver=ThreadedResolver(), ssl=True)
+        ex.session = aiohttp.ClientSession(connector=connector, trust_env=True)
+        return ex
+
+    async def _swap_host(self):
+        """Fecha o client atual e instancia um novo apontando para o próximo mirror."""
+        try:
+            await self.exchange.close()
+        except Exception:
+            pass
+        self._host_idx = (self._host_idx + 1) % len(_BINANCE_HOSTS)
+        new_host = _BINANCE_HOSTS[self._host_idx]
+        logger.warning("Trocando para host alternativo da Binance: %s", new_host)
+        self.exchange = self._make_exchange(new_host)
+
     async def fetch_recent_candles(self) -> np.ndarray:
         """
         Busca a janela necessária de K-lines. Para calcular indicadores como
         EMA21, VWAP96 e Wavelets(128), precisamos de pelo menos ~250 candles.
-        Buscaremos 300 candles.
+        Buscaremos 300 candles. Retry com backoff exponencial + fallback de hosts.
         """
         limit = 300
+        last_err: Exception | None = None
+
+        for host_attempt in range(len(_BINANCE_HOSTS)):
+            current_host = _BINANCE_HOSTS[self._host_idx]
+            for retry in range(_MAX_RETRIES_PER_HOST):
+                try:
+                    raw_candles = await self.exchange.fetch_ohlcv(
+                        Config.TRADING_SYMBOL, Config.TIMEFRAME, limit=limit
+                    )
+                    if not raw_candles or len(raw_candles) < Config.WINDOW_SIZE + 100:
+                        logger.error("Não há candles suficientes retornados pela API.")
+                        return None
+                    # Format: [ts, open, high, low, close, volume]
+                    return np.array(raw_candles, dtype=np.float64)
+                except Exception as e:
+                    last_err = e
+                    delay = 2 ** retry  # 1s, 2s, 4s
+                    logger.warning(
+                        "Falha ao buscar candles em %s (tentativa %d/%d): %s: %s. Aguardando %ds.",
+                        current_host, retry + 1, _MAX_RETRIES_PER_HOST,
+                        type(e).__name__, e, delay,
+                    )
+                    if retry < _MAX_RETRIES_PER_HOST - 1:
+                        await asyncio.sleep(delay)
+
+            # Esgotou retries neste host — troca para o próximo mirror.
+            if host_attempt < len(_BINANCE_HOSTS) - 1:
+                await self._swap_host()
+
+        logger.error("Todos os hosts da Binance falharam.", exc_info=last_err)
+        return None
+
+    async def close(self):
         try:
-            raw_candles = await self.exchange.fetch_ohlcv(Config.TRADING_SYMBOL, Config.TIMEFRAME, limit=limit)
-            if not raw_candles or len(raw_candles) < Config.WINDOW_SIZE + 100:
-                logger.error("Não há candles suficientes retornados pela API.")
-                return None
-            
-            # Format: [ts, open, high, low, close, volume]
-            arr = np.array(raw_candles, dtype=np.float64)
-            return arr
-        except Exception as e:
-            logger.error(f"Erro ao buscar K-Lines: {e}")
-            return None
-        finally:
             await self.exchange.close()
+        except Exception:
+            pass
 
     # ---- Funções Replicadas do Dataset Kaggle ----
     def ema(self, values: np.ndarray, period: int) -> np.ndarray:
+        """EMA tolerante a NaN no início da série (necessário para encadear
+        indicadores cujas saídas têm NaN de aquecimento, como dx → adx)."""
         alpha = 2.0 / (period + 1)
         result = np.full(len(values), np.nan)
-        if len(values) < period: return result
-        result[period - 1] = np.mean(values[:period])
-        for i in range(period, len(values)):
-            result[i] = values[i] * alpha + result[i - 1] * (1 - alpha)
+
+        # Pula NaN iniciais para encontrar a primeira janela utilizável.
+        first_valid = 0
+        while first_valid < len(values) and np.isnan(values[first_valid]):
+            first_valid += 1
+
+        seed_end = first_valid + period
+        if seed_end > len(values):
+            return result
+
+        seed_window = values[first_valid:seed_end]
+        if np.any(np.isnan(seed_window)):
+            # NaN no meio da janela de seed — não dá pra iniciar com confiança.
+            return result
+
+        result[seed_end - 1] = np.mean(seed_window)
+        for i in range(seed_end, len(values)):
+            if np.isnan(values[i]):
+                result[i] = result[i - 1]
+            else:
+                result[i] = values[i] * alpha + result[i - 1] * (1 - alpha)
         return result
 
     def rsi(self, values: np.ndarray, period: int = 14) -> np.ndarray:
@@ -267,6 +348,11 @@ class DataProcessor:
             ])
 
         X = np.array([rows], dtype=np.float32)
-        # Returns current close price alongside features for PnL calculation
+        # Retorna preço atual + ADX corrente para registro/visualização das decisões.
         current_close = closes[w_end - 1]
-        return X, current_close
+        current_adx = adx_all[w_end - 1]
+        if np.isnan(current_adx):
+            current_adx = None
+        else:
+            current_adx = float(current_adx)
+        return X, current_close, current_adx

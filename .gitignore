@@ -3,8 +3,10 @@ node_modules
 *.zip
 .runtime/
 dist/
+
 models/
 .venv
+__pycache__
 
 # .NET secrets (contém Google ClientId, JWT secret, Encryption key)
 appsettings.Development.json

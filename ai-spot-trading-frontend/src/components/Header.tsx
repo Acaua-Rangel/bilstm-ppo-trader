@@ -1,13 +1,23 @@
-import { useLayoutEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { startGoogleLogin } from '../auth/googleOAuth';
+import { UserMenu } from './UserMenu';
 import gsap from 'gsap';
-import { LayoutDashboard, LogIn, LogOut } from 'lucide-react';
+import { LayoutDashboard, LogIn } from 'lucide-react';
 
 export const Header = () => {
-  const { isAuthenticated, user, logout } = useAuth();
+  const { isAuthenticated, user } = useAuth();
   const navigate = useNavigate();
   const headerRef = useRef<HTMLElement>(null);
+  const [scrolled, setScrolled] = useState(false);
+
+  useEffect(() => {
+    const onScroll = () => setScrolled(window.scrollY > 4);
+    onScroll();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, []);
 
   useLayoutEffect(() => {
     if (headerRef.current) {
@@ -21,23 +31,22 @@ export const Header = () => {
 
   const handleAuthAction = () => {
     if (isAuthenticated) {
-      navigate(user?.hasExchangeAccount ? '/dashboard' : '/onboarding/api-keys');
+      navigate('/dashboard');
     } else {
-      navigate('/login');
+      startGoogleLogin('/dashboard');
     }
-  };
-
-  const handleLogout = async () => {
-    await logout();
-    navigate('/');
   };
 
   return (
     <header
       ref={headerRef}
-      className="fixed top-0 left-0 w-full z-50 glass-card rounded-none border-t-0 border-x-0 bg-background/80"
+      className={`fixed top-0 left-0 w-full z-50 transition-all duration-300 ${
+        scrolled
+          ? 'bg-background/40 backdrop-blur-xl backdrop-saturate-150'
+          : 'bg-transparent'
+      }`}
     >
-      <div className="container mx-auto px-6 h-20 flex items-center justify-between">
+      <div className="max-w-6xl mx-auto px-6 h-20 flex items-center justify-between">
         <Link to="/" className="flex items-center gap-2 group">
           <svg width="40" height="30" viewBox="0 0 106 76" fill="none" xmlns="http://www.w3.org/2000/svg" className="transform group-hover:scale-110 transition-transform">
             <path
@@ -50,39 +59,31 @@ export const Header = () => {
           <span className="text-xl font-bold tracking-wider uppercase text-white group-hover:text-primary transition-colors">
             Apex Vision
           </span>
+          <span className="ml-1 px-2 py-0.5 text-[10px] font-bold tracking-widest uppercase rounded-full bg-primary/15 text-primary border border-primary/30 leading-none">
+            Beta
+          </span>
         </Link>
 
         <nav className="flex items-center gap-4">
           {isAuthenticated && user && (
-            <div className="hidden sm:flex items-center gap-3">
-              {user.avatarUrl && (
-                <img src={user.avatarUrl} alt="" className="w-8 h-8 rounded-full" referrerPolicy="no-referrer" />
-              )}
-              <span className="text-white/80 text-sm">{user.name ?? user.email}</span>
-              <button
-                onClick={handleLogout}
-                className="text-white/60 hover:text-white transition-colors flex items-center gap-2 text-sm font-medium"
-              >
-                <LogOut size={16} /> Sair
-              </button>
+            <div className="animated-border-btn" onClick={handleAuthAction}>
+              <div className="btn-inner">
+                <LayoutDashboard size={18} className="text-primary" />
+                <span className="font-semibold text-white">Dashboard</span>
+              </div>
             </div>
           )}
 
-          <div className="animated-border-btn" onClick={handleAuthAction}>
-            <div className="btn-inner">
-              {isAuthenticated ? (
-                <>
-                  <LayoutDashboard size={18} className="text-primary" />
-                  <span className="font-semibold text-white">Dashboard</span>
-                </>
-              ) : (
-                <>
-                  <LogIn size={18} className="text-binance" />
-                  <span className="font-semibold text-white">Entrar com Google</span>
-                </>
-              )}
+          {isAuthenticated ? (
+            <UserMenu />
+          ) : (
+            <div className="animated-border-btn" onClick={handleAuthAction}>
+              <div className="btn-inner">
+                <span className="font-semibold text-white">Entrar com Google</span>
+                <LogIn size={18} className="text-binance" />
+              </div>
             </div>
-          </div>
+          )}
         </nav>
       </div>
     </header>

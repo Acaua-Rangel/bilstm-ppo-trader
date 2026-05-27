@@ -13,7 +13,8 @@ export default {
         binance: "#F0B90B"
       },
       fontFamily: {
-        sans: ['League Spartan', 'sans-serif'],
+        sans: ['Geist', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        mono: ['"Geist Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
       }
     },
   },

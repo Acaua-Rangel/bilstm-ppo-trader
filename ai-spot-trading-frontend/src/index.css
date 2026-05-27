@@ -1,12 +1,22 @@
-@import url('https://fonts.googleapis.com/css2?family=League+Spartan:wght@300;400;600;800&display=swap');
-
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 @layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
   body {
     @apply bg-background text-white font-sans overflow-x-hidden;
+  }
+  /* Inter para texto, JetBrains Mono para números/códigos */
+  .tabular-nums,
+  code,
+  pre,
+  kbd,
+  samp {
+    font-feature-settings: 'tnum' on, 'lnum' on;
   }
 }
 
@@ -36,7 +46,7 @@
 }
 
 .btn-inner {
-  @apply bg-background w-full h-full rounded-full px-6 py-3 flex items-center justify-center gap-2;
+  @apply bg-background w-full h-full rounded-full px-6 py-3 flex items-center justify-center gap-2 leading-none;
 }
 
 .loader-container {

@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("AiSpotTrading.Backend")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+a78bde42b03f137b6d02a539b918f748987a2009")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+70561a95d7e5ebbe730e5c4aa761e7928b274102")]
 [assembly: System.Reflection.AssemblyProductAttribute("AiSpotTrading.Backend")]
 [assembly: System.Reflection.AssemblyTitleAttribute("AiSpotTrading.Backend")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

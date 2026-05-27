@@ -27,6 +27,8 @@ namespace AiSpotTrading.Backend.Repositories
     public interface ITradeRepository
     {
         Task<IEnumerable<Trade>> GetTradesByBinanceUidAsync(string binanceUid);
+        Task<IEnumerable<Trade>> GetRecentByBinanceUidAsync(string binanceUid, DateTime since);
+        Task<IEnumerable<Trade>> GetRecentByBinanceUidsAsync(IEnumerable<string> binanceUids, DateTime since);
         Task<Trade> CreateTradeAsync(Trade trade);
     }
 }

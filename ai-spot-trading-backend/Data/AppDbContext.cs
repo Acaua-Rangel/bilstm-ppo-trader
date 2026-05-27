@@ -39,6 +39,13 @@ namespace AiSpotTrading.Backend.Data
             modelBuilder.Entity<Trade>()
                 .Property(t => t.PnL)
                 .HasPrecision(18, 8);
+
+            modelBuilder.Entity<Trade>()
+                .Property(t => t.Adx)
+                .HasPrecision(8, 4);
+
+            modelBuilder.Entity<Trade>()
+                .HasIndex(t => new { t.BinanceUid, t.Timestamp });
         }
     }
 }

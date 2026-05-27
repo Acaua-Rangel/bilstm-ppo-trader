@@ -42,7 +42,7 @@ export const ConnectBinance = () => {
 
   return (
     <div className="min-h-screen pt-32 pb-20 px-6">
-      <div className="container mx-auto max-w-6xl">
+      <div className="max-w-6xl mx-auto">
         <header className="mb-8">
           <h1 className="text-3xl font-bold text-white">Conecte sua conta Binance</h1>
           <p className="text-white/60 mt-2">
@@ -109,7 +109,7 @@ export const ConnectBinance = () => {
                 />
               </Field>
 
-              <Field label="Capital alocado (USDT)">
+              <Field label="Capital alocado (FDUSD)">
                 <input
                   type="number"
                   min="0"
@@ -163,8 +163,9 @@ export const ConnectBinance = () => {
           border: 1px solid rgba(255,255,255,0.1);
           border-radius: 0.75rem;
           color: white;
-          font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+          font-family: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
           font-size: 0.9rem;
+          letter-spacing: -0.01em;
           outline: none;
           transition: border-color .2s;
         }

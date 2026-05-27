@@ -6,6 +6,8 @@ dist/
 
 .venv
 __pycache__
+pyproject.toml
+poetry.lock
 
 # .NET secrets (contém Google ClientId, JWT secret, Encryption key)
 appsettings.Development.json

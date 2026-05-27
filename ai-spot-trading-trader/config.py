@@ -17,8 +17,8 @@ class Config:
             f.write(_ca_content.replace("\\n", "\n"))
         MYSQL_SSL_CA = _ca_path
     else:
-        # Busca o ca.pem um nível acima (na raiz do repositório) por padrão
-        MYSQL_SSL_CA = os.getenv("MYSQL_SSL_CA", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "ca.pem")))
+        # Busca o ca.pem na mesma pasta do config.py
+        MYSQL_SSL_CA = os.getenv("MYSQL_SSL_CA", os.path.abspath(os.path.join(os.path.dirname(__file__), "ca.pem")))
 
     # Trading config
     TRADING_SYMBOL = "BTC/FDUSD"

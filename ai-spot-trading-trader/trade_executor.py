@@ -11,11 +11,21 @@ logger = logging.getLogger(__name__)
 
 def _decrypt_key(cipher_b64: str) -> str:
     """AES-256-GCM decrypt. Payload: base64(nonce[12] || tag[16] || ciphertext)."""
+    if not Config.ENCRYPTION_KEY:
+        raise RuntimeError(
+            "ENCRYPTION_KEY ausente no .env do trader. Copie do appsettings do backend "
+            "(seção Encryption:Key) — deve ser base64 de 32 bytes."
+        )
+    key = base64.b64decode(Config.ENCRYPTION_KEY)
+    if len(key) != 32:
+        raise RuntimeError(
+            f"ENCRYPTION_KEY inválida: decodificada tem {len(key)} bytes, esperado 32 "
+            "(AES-256). Verifique se a string base64 no .env é a mesma do backend."
+        )
     blob = base64.b64decode(cipher_b64)
     nonce = blob[:12]
     tag = blob[12:28]
     ciphertext = blob[28:]
-    key = base64.b64decode(Config.ENCRYPTION_KEY)
     aesgcm = AESGCM(key)
     # cryptography lib espera ciphertext || tag
     plaintext = aesgcm.decrypt(nonce, ciphertext + tag, None)

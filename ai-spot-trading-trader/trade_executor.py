@@ -35,7 +35,7 @@ class TradeExecutor:
     def __init__(self, db: Database):
         self.db = db
 
-    async def execute_signals(self, global_action: str, current_price: float, adx: float | None = None):
+    async def execute_signals(self, global_action: str, current_price: float):
         """
         Recebe o sinal global (BUY/SELL/HOLD) e o distribui para todos os usuários elegíveis.
         Todas as decisões (incluindo HOLD) são registradas no banco para gerar histórico no dashboard.
@@ -45,17 +45,17 @@ class TradeExecutor:
             logger.info("Nenhum usuário ativo. Sinal '%s' não foi registrado.", global_action)
             return
 
-        logger.info("Distribuindo sinal '%s' (price=%s, adx=%s) para %d usuários.",
-                    global_action, current_price, adx, len(users))
+        logger.info("Distribuindo sinal '%s' (price=%s) para %d usuários.",
+                    global_action, current_price, len(users))
 
-        tasks = [self._process_user_trade(u, global_action, current_price, adx) for u in users]
+        tasks = [self._process_user_trade(u, global_action, current_price) for u in users]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for i, res in enumerate(results):
             if isinstance(res, Exception):
                 logger.error("Erro ao processar usuário %s: %s", users[i]["BinanceUID"], res)
 
-    async def _process_user_trade(self, user: dict, global_action: str, current_price: float, adx: float | None):
+    async def _process_user_trade(self, user: dict, global_action: str, current_price: float):
         binance_uid = user["BinanceUID"]
         is_paper = bool(user["IsPaperTrading"])
         allocated_balance = float(user["AllocatedBalance"])
@@ -67,37 +67,37 @@ class TradeExecutor:
         if global_action == "HOLD":
             await self.db.save_trade(
                 binance_uid, symbol, "HOLD",
-                amount=0.0, price=current_price, is_paper=is_paper, pnl=0.0, adx=adx,
+                amount=0.0, price=current_price, is_paper=is_paper, pnl=0.0,
             )
-            logger.debug("[%s] HOLD registrado para %s | adx=%s", "PAPER" if is_paper else "REAL", binance_uid, adx)
+            logger.debug("[%s] HOLD registrado para %s", "PAPER" if is_paper else "REAL", binance_uid)
             return
 
         if global_action == "BUY" and current_position != "BUY":
             if is_paper:
                 amount = allocated_balance / current_price
-                await self.db.save_trade(binance_uid, symbol, "BUY", amount, current_price, True, 0.0, adx)
+                await self.db.save_trade(binance_uid, symbol, "BUY", amount, current_price, True, 0.0)
                 logger.info("[PAPER] BUY %s | Qtd: %.6f a %.2f", binance_uid, amount, current_price)
             else:
-                await self._real_buy(user, allocated_balance, current_price, adx)
+                await self._real_buy(user, allocated_balance, current_price)
 
         elif global_action == "SELL" and current_position == "BUY":
             buy_price = float(last_trade["Price"])
             amount = float(last_trade["Amount"])
             if is_paper:
                 pnl = (current_price - buy_price) * amount
-                await self.db.save_trade(binance_uid, symbol, "SELL", amount, current_price, True, pnl, adx)
+                await self.db.save_trade(binance_uid, symbol, "SELL", amount, current_price, True, pnl)
                 logger.info("[PAPER] SELL %s | PnL: %.4f USDT | Fechamento a %.2f", binance_uid, pnl, current_price)
             else:
-                await self._real_sell(user, amount, buy_price, current_price, adx)
+                await self._real_sell(user, amount, buy_price, current_price)
 
         else:
             # Sinal incompatível com posição atual — só registra.
             await self.db.save_trade(
                 binance_uid, symbol, global_action,
-                amount=0.0, price=current_price, is_paper=is_paper, pnl=0.0, adx=adx,
+                amount=0.0, price=current_price, is_paper=is_paper, pnl=0.0,
             )
 
-    async def _real_buy(self, user: dict, allocated_fdusd: float, ref_price: float, adx: float | None):
+    async def _real_buy(self, user: dict, allocated_fdusd: float, ref_price: float):
         binance_uid = user["BinanceUID"]
         exchange = None
         try:
@@ -115,7 +115,7 @@ class TradeExecutor:
             avg_price = float(order.get("average") or order.get("price") or ref_price)
 
             await self.db.save_trade(binance_uid, Config.BINANCE_SYMBOL, "BUY",
-                                     filled_btc, avg_price, False, 0.0, adx)
+                                     filled_btc, avg_price, False, 0.0)
             logger.info("[REAL] BUY %s | %.6f BTC @ %.2f FDUSD", binance_uid, filled_btc, avg_price)
         except Exception as exc:
             logger.error("[REAL BUY ERROR] %s: %s", binance_uid, exc)
@@ -124,7 +124,7 @@ class TradeExecutor:
             if exchange:
                 await exchange.close()
 
-    async def _real_sell(self, user: dict, btc_amount: float, buy_price: float, ref_price: float, adx: float | None):
+    async def _real_sell(self, user: dict, btc_amount: float, buy_price: float, ref_price: float):
         binance_uid = user["BinanceUID"]
         exchange = None
         try:
@@ -138,7 +138,7 @@ class TradeExecutor:
             pnl = (avg_price - buy_price) * filled_btc
 
             await self.db.save_trade(binance_uid, Config.BINANCE_SYMBOL, "SELL",
-                                     filled_btc, avg_price, False, pnl, adx)
+                                     filled_btc, avg_price, False, pnl)
             logger.info("[REAL] SELL %s | PnL: %.4f FDUSD | Fechamento a %.2f", binance_uid, pnl, avg_price)
         except Exception as exc:
             logger.error("[REAL SELL ERROR] %s: %s", binance_uid, exc)

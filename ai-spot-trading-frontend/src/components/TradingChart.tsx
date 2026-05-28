@@ -1,15 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   createChart,
-  createSeriesMarkers,
   CandlestickSeries,
   LineSeries,
   CrosshairMode,
   LineStyle,
   type IChartApi,
   type ISeriesApi,
-  type ISeriesMarkersPluginApi,
-  type SeriesMarker,
   type Time,
   type UTCTimestamp,
 } from 'lightweight-charts';
@@ -24,17 +21,165 @@ interface Props {
 }
 
 const COLORS = {
-  bg: 'transparent',
   text: '#a0a8b0',
   grid: 'rgba(255,255,255,0.04)',
   border: 'rgba(255,255,255,0.08)',
   up: '#71c829',
   down: '#ef4444',
   adx: '#f0b90b',
-  buy: '#71c829',
-  sell: '#ef4444',
-  hold: '#94a3b8',
+  zoneWin:  'rgba(113, 200, 41, 0.18)',
+  zoneLoss: 'rgba(239, 68,  68, 0.18)',
 };
+
+// ─── Primitive de zonas de fundo ──────────────────────────────────────────────
+
+interface Zone { from: UTCTimestamp; to: UTCTimestamp; color: string; }
+
+// Renderizador: desenha retângulos coloridos no canvas do chart.
+class ZoneRenderer {
+  private zones: Zone[];
+  private chart: IChartApi | null;
+  constructor(zones: Zone[], chart: IChartApi | null) { this.zones = zones; this.chart = chart; }
+
+  draw(target: {
+    useBitmapCoordinateSpace: (fn: (scope: {
+      context: CanvasRenderingContext2D;
+      bitmapSize: { width: number; height: number };
+      horizontalPixelRatio: number;
+    }) => void) => void;
+  }) {
+    if (!this.chart) return;
+    const { chart, zones } = this;
+    target.useBitmapCoordinateSpace(({ context, bitmapSize, horizontalPixelRatio }) => {
+      for (const zone of zones) {
+        const x1 = chart.timeScale().timeToCoordinate(zone.from as Time);
+        const x2 = chart.timeScale().timeToCoordinate(zone.to as Time);
+        if (x1 === null || x2 === null) continue;
+        const bx = Math.round(Math.min(x1, x2) * horizontalPixelRatio);
+        const bw = Math.round(Math.abs(x2 - x1) * horizontalPixelRatio);
+        context.fillStyle = zone.color;
+        context.fillRect(bx, 0, bw, bitmapSize.height);
+      }
+    });
+  }
+}
+
+// Primitive completo compatível com ISeriesPrimitive<Time> do lightweight-charts v5.
+class TradeZonePrimitive {
+  private zones: Zone[] = [];
+  private chart: IChartApi | null = null;
+  private _requestUpdate: (() => void) | null = null;
+
+  attached({ chart, requestUpdate }: { chart: IChartApi; requestUpdate: () => void }) {
+    this.chart = chart;
+    this._requestUpdate = requestUpdate;
+  }
+
+  detached() {
+    this.chart = null;
+    this._requestUpdate = null;
+  }
+
+  updateAllViews() {}
+
+  paneViews() {
+    const renderer = new ZoneRenderer(this.zones, this.chart);
+    return [{ renderer: () => renderer, zOrder: () => 'bottom' as const }];
+  }
+
+  setZones(zones: Zone[]) {
+    this.zones = zones;
+    this._requestUpdate?.();
+  }
+}
+
+// ─── ADX calculado localmente a partir dos klines ────────────────────────────
+
+function calcAdx(klines: Kline[], period = 14): Array<{ time: number; value: number }> {
+  const n = klines.length;
+  if (n < period * 2 + 1) return [];
+  const alpha = 2.0 / (period + 1);
+
+  function ema(values: number[]): number[] {
+    const result = new Array<number>(values.length).fill(NaN);
+    let firstValid = 0;
+    while (firstValid < values.length && isNaN(values[firstValid])) firstValid++;
+    const seedEnd = firstValid + period;
+    if (seedEnd > values.length) return result;
+    if (values.slice(firstValid, seedEnd).some(isNaN)) return result;
+    result[seedEnd - 1] = values.slice(firstValid, seedEnd).reduce((a, b) => a + b, 0) / period;
+    for (let i = seedEnd; i < values.length; i++) {
+      result[i] = isNaN(values[i])
+        ? result[i - 1]
+        : values[i] * alpha + result[i - 1] * (1 - alpha);
+    }
+    return result;
+  }
+
+  const tr: number[] = [];
+  const plusDm: number[] = [];
+  const minusDm: number[] = [];
+  for (let i = 1; i < n; i++) {
+    const { high: h, low: l } = klines[i];
+    const pc = klines[i - 1].close;
+    tr.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
+    const up = h - klines[i - 1].high;
+    const dn = klines[i - 1].low - l;
+    plusDm.push(up > dn && up > 0 ? up : 0);
+    minusDm.push(dn > up && dn > 0 ? dn : 0);
+  }
+
+  const atr = ema(tr);
+  const sPlusDm = ema(plusDm);
+  const sMinusDm = ema(minusDm);
+
+  const dx: number[] = tr.map((_, i) => {
+    if (isNaN(atr[i])) return NaN;
+    const pdi = 100 * sPlusDm[i] / (atr[i] + 1e-10);
+    const mdi = 100 * sMinusDm[i] / (atr[i] + 1e-10);
+    return 100 * Math.abs(pdi - mdi) / (pdi + mdi + 1e-10);
+  });
+
+  const adxArr = ema(dx);
+  const out: Array<{ time: number; value: number }> = [];
+  for (let i = 0; i < adxArr.length; i++) {
+    if (!isNaN(adxArr[i])) out.push({ time: klines[i + 1].time, value: adxArr[i] });
+  }
+  return out;
+}
+
+// ─── Lógica de construção de zonas a partir das decisões ──────────────────────
+
+interface ZoneStats { zones: Zone[]; wins: number; losses: number; holds: number; }
+
+function buildZones(decisions: TradeDecision[], candleSeconds: number): ZoneStats {
+  const sorted = [...decisions].sort((a, b) => a.timestamp - b.timestamp);
+  const zones: Zone[] = [];
+  let openBuy: TradeDecision | null = null;
+  let wins = 0;
+  let losses = 0;
+
+  for (const d of sorted) {
+    if (d.action === 'BUY' && !openBuy) {
+      openBuy = d;
+    } else if (d.action === 'SELL' && openBuy) {
+      const profitable = d.pnl > 0;
+      if (profitable) wins++; else losses++;
+      zones.push({
+        from: openBuy.timestamp as UTCTimestamp,
+        // Extende até o fim do candle do SELL para cobrir o candle inteiro
+        to: (d.timestamp + candleSeconds) as UTCTimestamp,
+        color: profitable ? COLORS.zoneWin : COLORS.zoneLoss,
+      });
+      openBuy = null;
+    }
+  }
+
+  const holds = decisions.filter(d => d.action === 'HOLD').length;
+  return { zones, wins, losses, holds };
+}
+
+// ─── Componente ───────────────────────────────────────────────────────────────
 
 export const TradingChart = ({ hours = 24, interval = '15m', symbol = 'BTCFDUSD' }: Props) => {
   const priceContainerRef = useRef<HTMLDivElement>(null);
@@ -43,21 +188,19 @@ export const TradingChart = ({ hours = 24, interval = '15m', symbol = 'BTCFDUSD'
   const adxChartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const adxSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
-  const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+  const zonePrimitiveRef = useRef<TradeZonePrimitive | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [trades, setTrades] = useState<TradeDecision[]>([]);
+  const [stats, setStats] = useState({ wins: 0, losses: 0, holds: 0 });
   const [adxTooltip, setAdxTooltip] = useState<{ x: number; y: number } | null>(null);
 
   // Inicializa os charts uma vez
   useEffect(() => {
     if (!priceContainerRef.current || !adxContainerRef.current) return;
 
-    // minimumWidth fixo garante que os dois charts reservem o mesmo espaço para o
-    // eixo de preço à direita — sem isso, os ticks do tempo desalinham verticalmente.
     const PRICE_SCALE_MIN_WIDTH = 70;
-
     const common = {
       layout: { background: { color: 'transparent' as const }, textColor: COLORS.text, fontFamily: 'Geist, sans-serif' },
       grid: { vertLines: { color: COLORS.grid }, horzLines: { color: COLORS.grid } },
@@ -78,9 +221,15 @@ export const TradingChart = ({ hours = 24, interval = '15m', symbol = 'BTCFDUSD'
       wickUpColor: COLORS.up,
       wickDownColor: COLORS.down,
     });
+
+    // Anexa o primitive de zonas ao candle series
+    const primitive = new TradeZonePrimitive();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (candle as any).attachPrimitive(primitive);
+
     priceChartRef.current = priceChart;
     candleSeriesRef.current = candle;
-    markersRef.current = createSeriesMarkers(candle, []);
+    zonePrimitiveRef.current = primitive;
 
     const adxChart = createChart(adxContainerRef.current, {
       ...common,
@@ -96,7 +245,6 @@ export const TradingChart = ({ hours = 24, interval = '15m', symbol = 'BTCFDUSD'
     adxChartRef.current = adxChart;
     adxSeriesRef.current = adxLine;
 
-    // Linha de referência em ADX=20: limiar mínimo no qual o modelo foi treinado a operar.
     adxLine.createPriceLine({
       price: 20,
       color: 'rgba(241, 191, 11, 0.6)',
@@ -106,25 +254,14 @@ export const TradingChart = ({ hours = 24, interval = '15m', symbol = 'BTCFDUSD'
       title: 'min 20',
     });
 
-    // Detecta hover próximo da linha do 20 → mostra tooltip explicando o limiar.
     adxChart.subscribeCrosshairMove((param) => {
-      if (!param.point || param.point.y === undefined) {
-        setAdxTooltip(null);
-        return;
-      }
+      if (!param.point || param.point.y === undefined) { setAdxTooltip(null); return; }
       const yOf20 = adxLine.priceToCoordinate(20);
-      if (yOf20 === null || yOf20 === undefined) {
-        setAdxTooltip(null);
-        return;
-      }
-      if (Math.abs(param.point.y - yOf20) < 6) {
-        setAdxTooltip({ x: param.point.x, y: yOf20 });
-      } else {
-        setAdxTooltip(null);
-      }
+      if (yOf20 === null || yOf20 === undefined) { setAdxTooltip(null); return; }
+      if (Math.abs(param.point.y - yOf20) < 6) setAdxTooltip({ x: param.point.x, y: yOf20 });
+      else setAdxTooltip(null);
     });
 
-    // Sincroniza os eixos de tempo dos dois gráficos
     const sync = (source: IChartApi, target: IChartApi) => {
       source.timeScale().subscribeVisibleLogicalRangeChange((range) => {
         if (range) target.timeScale().setVisibleLogicalRange(range);
@@ -133,9 +270,15 @@ export const TradingChart = ({ hours = 24, interval = '15m', symbol = 'BTCFDUSD'
     sync(priceChart, adxChart);
     sync(adxChart, priceChart);
 
+    const syncScaleWidth = () => {
+      const w = priceChart.priceScale('right').width();
+      if (w > 0) adxChart.applyOptions({ rightPriceScale: { minimumWidth: w } });
+    };
+
     const resize = () => {
       if (priceContainerRef.current) priceChart.resize(priceContainerRef.current.clientWidth, 380);
       if (adxContainerRef.current) adxChart.resize(adxContainerRef.current.clientWidth, 130);
+      syncScaleWidth();
     };
     window.addEventListener('resize', resize);
 
@@ -150,7 +293,6 @@ export const TradingChart = ({ hours = 24, interval = '15m', symbol = 'BTCFDUSD'
     setLoading(true);
     setError(null);
     try {
-      // Calcula limit baseado em horas + interval
       const minutesPerCandle = parseInterval(interval);
       const limit = Math.max(50, Math.min(1000, Math.ceil((hours * 60) / minutesPerCandle)));
 
@@ -159,61 +301,35 @@ export const TradingChart = ({ hours = 24, interval = '15m', symbol = 'BTCFDUSD'
         api.recentTrades(hours),
       ]);
 
-      // Ordena por tempo crescente — requisito do lightweight-charts para line e markers.
       const sortedDecisions = [...decisions].sort((a, b) => a.timestamp - b.timestamp);
-
-      // Corta o gráfico para iniciar no primeiro registro de decisão.
-      // Antes disso não há ADX/markers, então mostrar só candles ficaria desalinhado.
       const firstDecisionTs = sortedDecisions[0]?.timestamp ?? null;
       const filteredKlines: Kline[] =
         firstDecisionTs !== null ? klines.filter((k) => k.time >= firstDecisionTs) : [];
 
-      const candleData = filteredKlines.map((k) => ({
-        time: k.time as UTCTimestamp,
-        open: k.open,
-        high: k.high,
-        low: k.low,
-        close: k.close,
-      }));
-      candleSeriesRef.current?.setData(candleData);
+      candleSeriesRef.current?.setData(
+        filteredKlines.map((k) => ({
+          time: k.time as UTCTimestamp,
+          open: k.open, high: k.high, low: k.low, close: k.close,
+        }))
+      );
 
-      // ADX: line series exige timestamps únicos e ordenados; ficamos com o último valor
-      // gravado para cada timestamp.
-      const adxByTs = new Map<number, number>();
-      for (const d of sortedDecisions) {
-        if (d.adx !== null && d.adx !== undefined) adxByTs.set(d.timestamp, Number(d.adx));
-      }
-      const adxPoints = [...adxByTs.entries()].map(([t, v]) => ({
-        time: t as UTCTimestamp,
-        value: v,
-      }));
-      adxSeriesRef.current?.setData(adxPoints);
+      adxSeriesRef.current?.setData(
+        calcAdx(klines, 14)
+          .filter(({ time }) => firstDecisionTs === null || time >= firstDecisionTs)
+          .map(({ time, value }) => ({ time: time as UTCTimestamp, value }))
+      );
 
-      // Markers: também precisam de timestamps únicos. Se múltiplas decisões caírem no mesmo
-      // segundo, mostramos a "mais relevante" (BUY/SELL ganha de HOLD).
-      const priority: Record<string, number> = { BUY: 3, SELL: 3, HOLD: 1 };
-      const markerByTs = new Map<number, TradeDecision>();
-      for (const d of sortedDecisions) {
-        const existing = markerByTs.get(d.timestamp);
-        if (!existing || priority[d.action] > priority[existing.action]) {
-          markerByTs.set(d.timestamp, d);
-        }
-      }
-      const markers: SeriesMarker<Time>[] = [...markerByTs.values()].map((d) => {
-        const isBuy = d.action === 'BUY';
-        const isSell = d.action === 'SELL';
-        return {
-          time: d.timestamp as UTCTimestamp,
-          position: isBuy ? 'belowBar' : isSell ? 'aboveBar' : 'inBar',
-          color: isBuy ? COLORS.buy : isSell ? COLORS.sell : COLORS.hold,
-          shape: isBuy ? 'arrowUp' : isSell ? 'arrowDown' : 'circle',
-          text: d.action === 'HOLD' ? undefined : d.action,
-          size: d.action === 'HOLD' ? 0.8 : 1.2,
-        };
-      });
-      markersRef.current?.setMarkers(markers);
+      // Constrói zonas verde/vermelha a partir dos pares BUY→SELL
+      const candleSeconds = minutesPerCandle * 60;
+      const { zones, wins, losses, holds } = buildZones(sortedDecisions, candleSeconds);
+      zonePrimitiveRef.current?.setZones(zones);
+      setStats({ wins, losses, holds });
 
       priceChartRef.current?.timeScale().fitContent();
+      requestAnimationFrame(() => {
+        const w = priceChartRef.current?.priceScale('right').width() ?? 0;
+        if (w > 0) adxChartRef.current?.applyOptions({ rightPriceScale: { minimumWidth: w } });
+      });
       setTrades(decisions);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Falha ao carregar dados.');
@@ -224,13 +340,10 @@ export const TradingChart = ({ hours = 24, interval = '15m', symbol = 'BTCFDUSD'
 
   useEffect(() => {
     load();
-    // Recarrega periodicamente
     const id = window.setInterval(load, 60_000);
     return () => window.clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hours, interval, symbol]);
-
-  const counts = countActions(trades);
 
   return (
     <div className="glass-card p-6">
@@ -242,9 +355,9 @@ export const TradingChart = ({ hours = 24, interval = '15m', symbol = 'BTCFDUSD'
           </p>
         </div>
         <div className="flex items-center gap-4 text-xs font-medium">
-          <Legend color={COLORS.buy} label={`BUY (${counts.BUY})`} />
-          <Legend color={COLORS.sell} label={`SELL (${counts.SELL})`} />
-          <Legend color={COLORS.hold} label={`HOLD (${counts.HOLD})`} />
+          <ZoneLegend color={COLORS.zoneWin}  label={`Acertos (${stats.wins})`} />
+          <ZoneLegend color={COLORS.zoneLoss} label={`Erros (${stats.losses})`} />
+          <ZoneLegend color="rgba(148,163,184,0.15)" label={`HOLD (${stats.holds})`} />
           <button
             onClick={load}
             disabled={loading}
@@ -300,9 +413,9 @@ export const TradingChart = ({ hours = 24, interval = '15m', symbol = 'BTCFDUSD'
   );
 };
 
-const Legend = ({ color, label }: { color: string; label: string }) => (
+const ZoneLegend = ({ color, label }: { color: string; label: string }) => (
   <span className="inline-flex items-center gap-1.5 text-white/70">
-    <span className="w-2.5 h-2.5 rounded-full" style={{ background: color }} />
+    <span className="w-8 h-3 rounded-sm" style={{ background: color, border: '1px solid rgba(255,255,255,0.1)' }} />
     {label}
   </span>
 );
@@ -312,14 +425,4 @@ function parseInterval(interval: string): number {
   if (!m) return 15;
   const n = parseInt(m[1], 10);
   return m[2] === 'h' ? n * 60 : m[2] === 'd' ? n * 1440 : n;
-}
-
-function countActions(decisions: TradeDecision[]) {
-  return decisions.reduce(
-    (acc, d) => {
-      acc[d.action] = (acc[d.action] ?? 0) + 1;
-      return acc;
-    },
-    { BUY: 0, SELL: 0, HOLD: 0 } as Record<'BUY' | 'SELL' | 'HOLD', number>,
-  );
 }

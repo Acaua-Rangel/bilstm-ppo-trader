@@ -108,7 +108,6 @@ export interface TradeDecision {
   action: 'BUY' | 'SELL' | 'HOLD';
   price: number;
   amount: number;
-  adx: number | null;
   pnl: number;
   type: 'PAPER' | 'REAL';
   timestamp: number; // unix seconds

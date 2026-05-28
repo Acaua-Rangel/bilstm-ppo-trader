@@ -36,14 +36,13 @@ async def run_inference_cycle(processor, model_loader, executor):
         return
         
     features, current_price, candle_info = result
-    current_adx = candle_info.get('adx')
 
     # 3. Predição do modelo ML
     global_action = model_loader.predict(features, candle_info)
-    logger.info(f"Sinal do Modelo: {global_action} | Preço: {current_price} | ADX: {current_adx}")
+    logger.info(f"Sinal do Modelo: {global_action} | Preço: {current_price}")
 
     # 4. Motor Assíncrono (Distribui para todas as contas)
-    await executor.execute_signals(global_action, current_price, current_adx)
+    await executor.execute_signals(global_action, current_price)
 
     logger.info("== Ciclo de Inferência Concluído ==")
 

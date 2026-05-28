@@ -31,20 +31,13 @@ _TABLE_DDL = {
             `Timestamp` DATETIME(6) NOT NULL,
             `Type` VARCHAR(20) NOT NULL,
             `PnL` DECIMAL(18,8) NOT NULL,
-            `Adx` DECIMAL(8,4) NULL,
             PRIMARY KEY (`Id`),
             INDEX `idx_trades_uid_ts` (`BinanceUid`, `Timestamp`)
         ) CHARACTER SET=utf8mb4;
     """,
 }
 
-# Garante que a coluna Adx exista mesmo em bancos criados antes dessa versão.
-_TABLE_MIGRATIONS = [
-    """
-    ALTER TABLE `Trades`
-    ADD COLUMN IF NOT EXISTS `Adx` DECIMAL(8,4) NULL
-    """,
-]
+_TABLE_MIGRATIONS: list[str] = []
 
 
 class Database:
@@ -128,18 +121,18 @@ class Database:
                 await cur.execute(query)
                 return await cur.fetchall()
 
-    async def save_trade(self, binance_uid, symbol, action, amount, price, is_paper, pnl=0.0, adx=None):
+    async def save_trade(self, binance_uid, symbol, action, amount, price, is_paper, pnl=0.0):
         """Salva a operação/decisão no banco. BUY/SELL movimentam posição; HOLD apenas registra a decisão do modelo."""
         trade_type = "PAPER" if is_paper else "REAL"
         # UTC_TIMESTAMP(6) garante que o registro use UTC, independente do fuso do servidor MySQL.
         # O backend interpreta este DATETIME como UTC ao serializar para o frontend.
         query = """
-            INSERT INTO Trades (BinanceUid, Symbol, Action, Amount, Price, Timestamp, Type, PnL, Adx)
-            VALUES (%s, %s, %s, %s, %s, UTC_TIMESTAMP(6), %s, %s, %s)
+            INSERT INTO Trades (BinanceUid, Symbol, Action, Amount, Price, Timestamp, Type, PnL)
+            VALUES (%s, %s, %s, %s, %s, UTC_TIMESTAMP(6), %s, %s)
         """
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(query, (binance_uid, symbol, action, amount, price, trade_type, pnl, adx))
+                await cur.execute(query, (binance_uid, symbol, action, amount, price, trade_type, pnl))
 
     async def get_last_trade(self, binance_uid, symbol, is_paper):
         """Busca a última operação real (BUY/SELL) do usuário para calcular PnL teórico. HOLDs são ignorados."""

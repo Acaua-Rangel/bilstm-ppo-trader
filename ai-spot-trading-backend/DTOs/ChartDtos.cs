@@ -6,7 +6,6 @@ namespace AiSpotTrading.Backend.DTOs
         public string Action { get; set; } = string.Empty; // BUY, SELL, HOLD
         public decimal Price { get; set; }
         public decimal Amount { get; set; }
-        public decimal? Adx { get; set; }
         public decimal PnL { get; set; }
         public string Type { get; set; } = string.Empty; // PAPER, REAL
         public long Timestamp { get; set; } // unix seconds

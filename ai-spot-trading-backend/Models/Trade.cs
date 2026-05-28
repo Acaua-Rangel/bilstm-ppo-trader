@@ -31,7 +31,5 @@ namespace AiSpotTrading.Backend.Models
         public string Type { get; set; } = string.Empty; // REAL, PAPER
 
         public decimal PnL { get; set; }
-
-        public decimal? Adx { get; set; }
     }
 }

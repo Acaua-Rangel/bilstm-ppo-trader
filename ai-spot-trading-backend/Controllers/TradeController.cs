@@ -45,7 +45,6 @@ namespace AiSpotTrading.Backend.Controllers
                 Action = t.Action,
                 Price = t.Price,
                 Amount = t.Amount,
-                Adx = t.Adx,
                 PnL = t.PnL,
                 Type = t.Type,
                 Timestamp = new DateTimeOffset(DateTime.SpecifyKind(t.Timestamp, DateTimeKind.Utc)).ToUnixTimeSeconds(),

@@ -85,7 +85,12 @@ namespace AiSpotTrading.Backend.Controllers
             if (!dto.IsPaperTrading && string.IsNullOrEmpty(account.EncryptedApiKey))
                 return BadRequest(new { error = "Cadastre suas API keys da Binance antes de operar com dinheiro real." });
 
-            account.AllocatedBalance = dto.AllocatedBalance;
+            if (account.AllocatedBalance != dto.AllocatedBalance)
+            {
+                account.AllocatedBalance = dto.AllocatedBalance;
+                // Novo aporte zera o baseline: PnL passa a ser contado a partir de agora.
+                account.BalanceUpdatedAt = DateTime.UtcNow;
+            }
             account.IsPaperTrading = dto.IsPaperTrading;
             account.IsActive = dto.IsActive;
             await _accountRepo.UpdateAccountAsync(account);

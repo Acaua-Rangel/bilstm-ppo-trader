@@ -91,11 +91,10 @@ class TradeExecutor:
                 await self._real_sell(user, amount, buy_price, current_price)
 
         else:
-            # Sinal incompatível com posição atual — só registra.
-            await self.db.save_trade(
-                binance_uid, symbol, global_action,
-                amount=0.0, price=current_price, is_paper=is_paper, pnl=0.0,
-            )
+            # Sinal incompatível com posição atual (ex.: SELL sem position, BUY já comprado).
+            # Apenas loga — não grava no banco para não poluir o histórico com trades fantasmas.
+            logger.debug("[%s] Sinal %s ignorado para %s (posição atual: %s)",
+                         "PAPER" if is_paper else "REAL", global_action, binance_uid, current_position)
 
     async def _real_buy(self, user: dict, allocated_fdusd: float, ref_price: float):
         binance_uid = user["BinanceUID"]

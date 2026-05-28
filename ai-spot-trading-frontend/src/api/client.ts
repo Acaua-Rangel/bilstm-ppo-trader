@@ -101,7 +101,23 @@ export const api = {
 
   klines: (symbol = 'BTCFDUSD', interval = '15m', limit = 96) =>
     request<Kline[]>(`/api/market/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`),
+
+  portfolio: () => request<PortfolioItem[]>('/api/portfolio'),
 };
+
+export interface PortfolioItem {
+  exchangeAccountId: number;
+  binanceUid: string;
+  isPaperTrading: boolean;
+  initialBalance: number;
+  realizedPnL: number;
+  unrealizedPnL: number;
+  estimatedTotal: number;
+  currentPrice: number;
+  hasOpenPosition: boolean;
+  openBuyPrice: number | null;
+  openAmount: number | null;
+}
 
 export interface TradeDecision {
   id: number;

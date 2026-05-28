@@ -20,4 +20,19 @@ namespace AiSpotTrading.Backend.DTOs
         public decimal Close { get; set; }
         public decimal Volume { get; set; }
     }
+
+    public class PortfolioDto
+    {
+        public int ExchangeAccountId { get; set; }
+        public string BinanceUid { get; set; } = string.Empty;
+        public bool IsPaperTrading { get; set; }
+        public decimal InitialBalance { get; set; }
+        public decimal RealizedPnL { get; set; }
+        public decimal UnrealizedPnL { get; set; }
+        public decimal EstimatedTotal { get; set; }
+        public decimal CurrentPrice { get; set; }
+        public bool HasOpenPosition { get; set; }
+        public decimal? OpenBuyPrice { get; set; }
+        public decimal? OpenAmount { get; set; }
+    }
 }

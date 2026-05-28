@@ -42,6 +42,16 @@ namespace AiSpotTrading.Backend.Repositories
                 .ToListAsync();
         }
 
+        public async Task<IEnumerable<Trade>> GetByBinanceUidsAsync(IEnumerable<string> binanceUids)
+        {
+            var ids = binanceUids.ToList();
+            if (ids.Count == 0) return Array.Empty<Trade>();
+            return await _context.Trades
+                .Where(t => ids.Contains(t.BinanceUid))
+                .OrderBy(t => t.Timestamp)
+                .ToListAsync();
+        }
+
         public async Task<Trade> CreateTradeAsync(Trade trade)
         {
             _context.Trades.Add(trade);

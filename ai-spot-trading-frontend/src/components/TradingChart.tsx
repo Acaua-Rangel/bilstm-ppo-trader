@@ -27,48 +27,49 @@ const COLORS = {
   up: '#71c829',
   down: '#ef4444',
   adx: '#f0b90b',
-  zoneWin:  'rgba(113, 200, 41, 0.18)',
-  zoneLoss: 'rgba(239, 68,  68, 0.18)',
+  zoneWin:      'rgba(113, 200, 41, 0.015)',
+  zoneLoss:     'rgba(239, 68,  68, 0.015)',
+  zoneWinSwatch:  'rgba(113, 200, 41, 0.15)',
+  zoneLossSwatch: 'rgba(239, 68,  68, 0.15)',
 };
 
 // ─── Primitive de zonas de fundo ──────────────────────────────────────────────
 
 interface Zone { from: UTCTimestamp; to: UTCTimestamp; color: string; }
 
-// Renderizador: desenha retângulos coloridos no canvas do chart.
-class ZoneRenderer {
-  private zones: Zone[];
-  private chart: IChartApi | null;
-  constructor(zones: Zone[], chart: IChartApi | null) { this.zones = zones; this.chart = chart; }
-
-  draw(target: {
-    useBitmapCoordinateSpace: (fn: (scope: {
-      context: CanvasRenderingContext2D;
-      bitmapSize: { width: number; height: number };
-      horizontalPixelRatio: number;
-    }) => void) => void;
-  }) {
-    if (!this.chart) return;
-    const { chart, zones } = this;
-    target.useBitmapCoordinateSpace(({ context, bitmapSize, horizontalPixelRatio }) => {
-      for (const zone of zones) {
-        const x1 = chart.timeScale().timeToCoordinate(zone.from as Time);
-        const x2 = chart.timeScale().timeToCoordinate(zone.to as Time);
-        if (x1 === null || x2 === null) continue;
-        const bx = Math.round(Math.min(x1, x2) * horizontalPixelRatio);
-        const bw = Math.round(Math.abs(x2 - x1) * horizontalPixelRatio);
-        context.fillStyle = zone.color;
-        context.fillRect(bx, 0, bw, bitmapSize.height);
-      }
-    });
-  }
-}
-
 // Primitive completo compatível com ISeriesPrimitive<Time> do lightweight-charts v5.
+// O renderer é persistente e lê zones/chart diretamente do primitive a cada draw,
+// evitando o problema de paneViews() ser cacheado com zones vazias na inicialização.
 class TradeZonePrimitive {
-  private zones: Zone[] = [];
-  private chart: IChartApi | null = null;
+  zones: Zone[] = [];
+  chart: IChartApi | null = null;
   private _requestUpdate: (() => void) | null = null;
+
+  private readonly _renderer = {
+    draw: (target: {
+      useBitmapCoordinateSpace: (fn: (scope: {
+        context: CanvasRenderingContext2D;
+        bitmapSize: { width: number; height: number };
+        horizontalPixelRatio: number;
+        verticalPixelRatio: number;
+      }) => void) => void;
+    }) => {
+      if (!this.chart || this.zones.length === 0) return;
+      const { chart, zones } = this;
+      target.useBitmapCoordinateSpace(({ context, bitmapSize, horizontalPixelRatio }) => {
+        for (const zone of zones) {
+          const x1 = chart.timeScale().timeToCoordinate(zone.from as Time);
+          const x2 = chart.timeScale().timeToCoordinate(zone.to as Time);
+          if (x1 === null || x2 === null) continue;
+          const lx = Math.max(0, Math.round(Math.min(x1, x2) * horizontalPixelRatio));
+          const rx = Math.min(bitmapSize.width, Math.round(Math.max(x1, x2) * horizontalPixelRatio));
+          if (rx <= lx) continue;
+          context.fillStyle = zone.color;
+          context.fillRect(lx, 0, rx - lx, bitmapSize.height);
+        }
+      });
+    },
+  };
 
   attached({ chart, requestUpdate }: { chart: IChartApi; requestUpdate: () => void }) {
     this.chart = chart;
@@ -83,8 +84,7 @@ class TradeZonePrimitive {
   updateAllViews() {}
 
   paneViews() {
-    const renderer = new ZoneRenderer(this.zones, this.chart);
-    return [{ renderer: () => renderer, zOrder: () => 'bottom' as const }];
+    return [{ renderer: () => this._renderer, zOrder: () => 'bottom' as const }];
   }
 
   setZones(zones: Zone[]) {
@@ -152,8 +152,28 @@ function calcAdx(klines: Kline[], period = 14): Array<{ time: number; value: num
 
 interface ZoneStats { zones: Zone[]; wins: number; losses: number; holds: number; }
 
-function buildZones(decisions: TradeDecision[], candleSeconds: number): ZoneStats {
-  const sorted = [...decisions].sort((a, b) => a.timestamp - b.timestamp);
+// Encontra o candle mais próximo (≤ ts) para garantir que timeToCoordinate
+// encontre o timestamp exato na escala de tempo do gráfico.
+function snapToKline(ts: number, times: number[]): UTCTimestamp {
+  let lo = 0, hi = times.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (times[mid] <= ts) lo = mid; else hi = mid - 1;
+  }
+  return times[lo] as UTCTimestamp;
+}
+
+function buildZones(
+  decisions: TradeDecision[],
+  candleSeconds: number,
+  chartStartTs: UTCTimestamp,
+  klineTimes: number[],
+): ZoneStats {
+  // Considera apenas trades reais (amount > 0). Sinais incompatíveis com a
+  // posição atual eram gravados com amount=0/pnl=0 e poluíam a contagem.
+  const sorted = [...decisions]
+    .filter(d => d.action === 'HOLD' || d.amount > 0)
+    .sort((a, b) => a.timestamp - b.timestamp);
   const zones: Zone[] = [];
   let openBuy: TradeDecision | null = null;
   let wins = 0;
@@ -162,13 +182,14 @@ function buildZones(decisions: TradeDecision[], candleSeconds: number): ZoneStat
   for (const d of sorted) {
     if (d.action === 'BUY' && !openBuy) {
       openBuy = d;
-    } else if (d.action === 'SELL' && openBuy) {
+    } else if (d.action === 'SELL') {
+      const rawFrom = openBuy ? openBuy.timestamp : (chartStartTs as number);
+      const rawTo = d.timestamp + candleSeconds;
       const profitable = d.pnl > 0;
       if (profitable) wins++; else losses++;
       zones.push({
-        from: openBuy.timestamp as UTCTimestamp,
-        // Extende até o fim do candle do SELL para cobrir o candle inteiro
-        to: (d.timestamp + candleSeconds) as UTCTimestamp,
+        from: snapToKline(rawFrom, klineTimes),
+        to: snapToKline(rawTo, klineTimes),
         color: profitable ? COLORS.zoneWin : COLORS.zoneLoss,
       });
       openBuy = null;
@@ -188,6 +209,7 @@ export const TradingChart = ({ hours = 24, interval = '15m', symbol = 'BTCFDUSD'
   const adxChartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const adxSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const adxWarmupSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const zonePrimitiveRef = useRef<TradeZonePrimitive | null>(null);
 
   const [loading, setLoading] = useState(true);
@@ -237,6 +259,17 @@ export const TradingChart = ({ hours = 24, interval = '15m', symbol = 'BTCFDUSD'
       width: adxContainerRef.current.clientWidth,
       timeScale: { ...common.timeScale, visible: true },
     });
+    // Série tracejada para o período de warm-up (~27 candles sem dado real)
+    const adxWarmup = adxChart.addSeries(LineSeries, {
+      color: 'rgba(240, 185, 11, 0.30)',
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
+    adxWarmupSeriesRef.current = adxWarmup;
+
     const adxLine = adxChart.addSeries(LineSeries, {
       color: COLORS.adx,
       lineWidth: 2,
@@ -262,13 +295,22 @@ export const TradingChart = ({ hours = 24, interval = '15m', symbol = 'BTCFDUSD'
       else setAdxTooltip(null);
     });
 
-    const sync = (source: IChartApi, target: IChartApi) => {
-      source.timeScale().subscribeVisibleLogicalRangeChange((range) => {
-        if (range) target.timeScale().setVisibleLogicalRange(range);
-      });
-    };
-    sync(priceChart, adxChart);
-    sync(adxChart, priceChart);
+    // Sync por logical range — dispara a cada pixel de scroll/zoom.
+    // Ambas as séries agora começam no mesmo timestamp (warm-up preenchido),
+    // então o range lógico é idêntico e não precisa de offset.
+    let syncing = false;
+    priceChart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+      if (syncing || !range) return;
+      syncing = true;
+      adxChart.timeScale().setVisibleLogicalRange(range);
+      syncing = false;
+    });
+    adxChart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+      if (syncing || !range) return;
+      syncing = true;
+      priceChart.timeScale().setVisibleLogicalRange(range);
+      syncing = false;
+    });
 
     const syncScaleWidth = () => {
       const w = priceChart.priceScale('right').width();
@@ -302,26 +344,35 @@ export const TradingChart = ({ hours = 24, interval = '15m', symbol = 'BTCFDUSD'
       ]);
 
       const sortedDecisions = [...decisions].sort((a, b) => a.timestamp - b.timestamp);
-      const firstDecisionTs = sortedDecisions[0]?.timestamp ?? null;
-      const filteredKlines: Kline[] =
-        firstDecisionTs !== null ? klines.filter((k) => k.time >= firstDecisionTs) : [];
+
+      // Mostra todos os klines quando há decisões; vazio apenas se não há nenhuma
+      const displayKlines = sortedDecisions.length > 0 ? klines : [];
 
       candleSeriesRef.current?.setData(
-        filteredKlines.map((k) => ({
+        displayKlines.map((k) => ({
           time: k.time as UTCTimestamp,
           open: k.open, high: k.high, low: k.low, close: k.close,
         }))
       );
 
+      const adxData = calcAdx(klines, 14);
+      const warmupCount = klines.length - adxData.length;
+      const firstAdxValue = adxData.length > 0 ? adxData[0].value : 0;
+      // Preenche o período de warm-up com linha tracejada no primeiro valor válido,
+      // garantindo que ambas as séries comecem no mesmo timestamp.
+      adxWarmupSeriesRef.current?.setData(
+        klines.slice(0, warmupCount + 1).map(k => ({ time: k.time as UTCTimestamp, value: firstAdxValue }))
+      );
       adxSeriesRef.current?.setData(
-        calcAdx(klines, 14)
-          .filter(({ time }) => firstDecisionTs === null || time >= firstDecisionTs)
-          .map(({ time, value }) => ({ time: time as UTCTimestamp, value }))
+        adxData.map(({ time, value }) => ({ time: time as UTCTimestamp, value }))
       );
 
-      // Constrói zonas verde/vermelha a partir dos pares BUY→SELL
+      // Constrói zonas verde/vermelha; SELLs cujo BUY ficou fora da janela
+      // usam o início do gráfico como ponto de partida da zona
       const candleSeconds = minutesPerCandle * 60;
-      const { zones, wins, losses, holds } = buildZones(sortedDecisions, candleSeconds);
+      const chartStartTs = (klines[0]?.time ?? 0) as UTCTimestamp;
+      const klineTimes = klines.map(k => k.time);
+      const { zones, wins, losses, holds } = buildZones(sortedDecisions, candleSeconds, chartStartTs, klineTimes);
       zonePrimitiveRef.current?.setZones(zones);
       setStats({ wins, losses, holds });
 
@@ -355,8 +406,8 @@ export const TradingChart = ({ hours = 24, interval = '15m', symbol = 'BTCFDUSD'
           </p>
         </div>
         <div className="flex items-center gap-4 text-xs font-medium">
-          <ZoneLegend color={COLORS.zoneWin}  label={`Acertos (${stats.wins})`} />
-          <ZoneLegend color={COLORS.zoneLoss} label={`Erros (${stats.losses})`} />
+          <ZoneLegend color={COLORS.zoneWinSwatch}  label={`Acertos (${stats.wins})`} />
+          <ZoneLegend color={COLORS.zoneLossSwatch} label={`Erros (${stats.losses})`} />
           <ZoneLegend color="rgba(148,163,184,0.15)" label={`HOLD (${stats.holds})`} />
           <button
             onClick={load}
@@ -415,7 +466,7 @@ export const TradingChart = ({ hours = 24, interval = '15m', symbol = 'BTCFDUSD'
 
 const ZoneLegend = ({ color, label }: { color: string; label: string }) => (
   <span className="inline-flex items-center gap-1.5 text-white/70">
-    <span className="w-8 h-3 rounded-sm" style={{ background: color, border: '1px solid rgba(255,255,255,0.1)' }} />
+    <span className="w-8 h-3 rounded-sm" style={{ background: color, outline: '1px solid rgba(255,255,255,0.1)' }} />
     {label}
   </span>
 );

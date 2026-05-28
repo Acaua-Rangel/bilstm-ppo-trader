@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { api } from '../api/client';
-import type { ExchangeAccountResponse } from '../api/client';
+import type { ExchangeAccountResponse, PortfolioItem } from '../api/client';
 import { ConfirmModal } from '../components/ConfirmModal';
 import { TradingChart } from '../components/TradingChart';
 import { Wallet, ChevronDown, Power, Play, Lock, FlaskConical, TrendingUp, Pencil, Check, X as XIcon, Loader2 } from 'lucide-react';
@@ -14,6 +14,7 @@ export const Dashboard = () => {
   const navigate = useNavigate();
 
   const [account, setAccount] = useState<ExchangeAccountResponse | null>(null);
+  const [portfolio, setPortfolio] = useState<PortfolioItem | null>(null);
   const [loading, setLoading] = useState(true);
   const [savingMode, setSavingMode] = useState(false);
   const [confirmInvest, setConfirmInvest] = useState(false);
@@ -38,9 +39,21 @@ export const Dashboard = () => {
     }
   }, []);
 
+  const fetchPortfolio = useCallback(async () => {
+    try {
+      const list = await api.portfolio();
+      setPortfolio(list[0] ?? null);
+    } catch {
+      setPortfolio(null);
+    }
+  }, []);
+
   useEffect(() => {
     fetchAccount();
-  }, [fetchAccount]);
+    fetchPortfolio();
+    const id = window.setInterval(fetchPortfolio, 60_000);
+    return () => window.clearInterval(id);
+  }, [fetchAccount, fetchPortfolio]);
 
   const mode: Mode = account?.isPaperTrading === false ? 'invest' : 'paper';
 
@@ -57,6 +70,7 @@ export const Dashboard = () => {
       });
       setAccount(updated);
       await refresh();
+      await fetchPortfolio();
     } finally {
       setSavingMode(false);
       setConfirmInvest(false);
@@ -75,6 +89,8 @@ export const Dashboard = () => {
         isActive: account.isActive,
       });
       setAccount(updated);
+      // Saldo alterado → backend resetou o baseline; recarrega portfolio para refletir.
+      await fetchPortfolio();
     } finally {
       setSavingBalance(false);
       setEditingBalance(false);
@@ -199,19 +215,12 @@ export const Dashboard = () => {
                 </button>
               </div>
             ) : (
-              <div className="flex items-baseline gap-2 group">
-                <h2 className="text-3xl font-bold text-white font-mono tabular-nums">
-                  ${(account?.allocatedBalance ?? 0).toFixed(2)}
-                </h2>
-                <button
-                  onClick={startEditingBalance}
-                  disabled={!account}
-                  title={account ? 'Editar saldo' : 'Cadastre a conta primeiro'}
-                  className="text-white/30 hover:text-primary transition-colors p-1 rounded disabled:opacity-30 disabled:cursor-not-allowed"
-                >
-                  <Pencil size={14} />
-                </button>
-              </div>
+              <BalanceDisplay
+                initial={account?.allocatedBalance ?? 0}
+                estimated={portfolio?.estimatedTotal ?? account?.allocatedBalance ?? 0}
+                onEdit={startEditingBalance}
+                canEdit={!!account}
+              />
             )}
 
             <p className="text-sm text-white/40 mt-2">
@@ -383,3 +392,45 @@ const ActivityIndicator = ({ active }: { active: boolean }) => (
     <span className={`relative inline-flex rounded-full h-3 w-3 ${active ? 'bg-primary' : 'bg-gray-500'}`}></span>
   </div>
 );
+
+interface BalanceDisplayProps {
+  initial: number;
+  estimated: number;
+  onEdit: () => void;
+  canEdit: boolean;
+}
+
+const BalanceDisplay = ({ initial, estimated, onEdit, canEdit }: BalanceDisplayProps) => {
+  const delta = estimated - initial;
+  const pct = initial > 0 ? (delta / initial) * 100 : 0;
+  // Verde se positivo, vermelho se negativo, branco se zero (ou inicial = 0).
+  const deltaColor =
+    delta > 0 ? 'text-primary' : delta < 0 ? 'text-red-400' : 'text-white';
+  const sign = delta > 0 ? '+' : '';
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-baseline gap-2 flex-wrap">
+        <h2 className="text-3xl font-bold text-white font-mono tabular-nums leading-none">
+          ${estimated.toFixed(2)}
+        </h2>
+        <span className={`text-sm font-mono tabular-nums font-semibold ${deltaColor}`}>
+          ({sign}{pct.toFixed(2)}%)
+        </span>
+      </div>
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-white/40 font-mono">
+          Inicial: <span className="text-white/60">${initial.toFixed(2)}</span>
+        </span>
+        <button
+          onClick={onEdit}
+          disabled={!canEdit}
+          title={canEdit ? 'Editar saldo inicial' : 'Cadastre a conta primeiro'}
+          className="text-white/30 hover:text-primary transition-colors p-0.5 rounded disabled:opacity-30 disabled:cursor-not-allowed"
+        >
+          <Pencil size={12} />
+        </button>
+      </div>
+    </div>
+  );
+};

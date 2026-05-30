@@ -26,6 +26,7 @@ _TABLE_DDL = {
             `BinanceUid` VARCHAR(100) NOT NULL,
             `Symbol` VARCHAR(50) NOT NULL,
             `Action` VARCHAR(20) NOT NULL,
+            `OriginalAction` VARCHAR(20) NOT NULL DEFAULT '',
             `Amount` DECIMAL(18,8) NOT NULL,
             `Price` DECIMAL(18,8) NOT NULL,
             `Timestamp` DATETIME(6) NOT NULL,
@@ -37,7 +38,10 @@ _TABLE_DDL = {
     """,
 }
 
-_TABLE_MIGRATIONS: list[str] = []
+_TABLE_MIGRATIONS: list[str] = [
+    # Adiciona OriginalAction em bases que já existiam antes dessa feature.
+    "ALTER TABLE `Trades` ADD COLUMN `OriginalAction` VARCHAR(20) NOT NULL DEFAULT '' AFTER `Action`",
+]
 
 
 class Database:
@@ -46,21 +50,11 @@ class Database:
 
     async def _ensure_database_exists(self):
         """Conecta ao servidor MySQL sem selecionar DB e garante que o schema exista."""
-        import ssl
-        import os
-        ssl_ctx = None
-        if os.path.exists(Config.MYSQL_SSL_CA):
-            ssl_ctx = ssl.create_default_context(cafile=Config.MYSQL_SSL_CA)
-            ssl_ctx.check_hostname = False
-        else:
-            logger.warning("Certificado CA %s não encontrado. Conectando sem SSL forçado.", Config.MYSQL_SSL_CA)
-            
         conn = await aiomysql.connect(
             host=Config.MYSQL_HOST,
             port=Config.MYSQL_PORT,
             user=Config.MYSQL_USER,
             password=Config.MYSQL_PASSWORD,
-            ssl=ssl_ctx,
             autocommit=True,
         )
         try:
@@ -88,24 +82,16 @@ class Database:
 
     async def connect(self):
         await self._ensure_database_exists()
-        import ssl
-        import os
-        ssl_ctx = None
-        if os.path.exists(Config.MYSQL_SSL_CA):
-            ssl_ctx = ssl.create_default_context(cafile=Config.MYSQL_SSL_CA)
-            ssl_ctx.check_hostname = False
-            
         self.pool = await aiomysql.create_pool(
             host=Config.MYSQL_HOST,
             port=Config.MYSQL_PORT,
             user=Config.MYSQL_USER,
             password=Config.MYSQL_PASSWORD,
             db=Config.MYSQL_DB,
-            ssl=ssl_ctx,
             autocommit=True
         )
         await self._ensure_tables_exist()
-        logger.info("Connected to MySQL database (SSL: %s).", "Yes" if ssl_ctx else "No")
+        logger.info("Connected to MySQL database.")
 
     async def get_active_users(self):
         """Busca contas de usuários elegíveis para trade, separando reais de paper trading."""
@@ -121,18 +107,25 @@ class Database:
                 await cur.execute(query)
                 return await cur.fetchall()
 
-    async def save_trade(self, binance_uid, symbol, action, amount, price, is_paper, pnl=0.0):
-        """Salva a operação/decisão no banco. BUY/SELL movimentam posição; HOLD apenas registra a decisão do modelo."""
+    async def save_trade(self, binance_uid, symbol, action, amount, price, is_paper, pnl=0.0, original_action=None):
+        """Salva a operação/decisão no banco. BUY/SELL movimentam posição; HOLD apenas registra a decisão do modelo.
+
+        original_action: o que o modelo recomendou antes de ser filtrado pela posição atual
+        (ex.: SELL emitido com usuário flat vira action='HOLD' / original_action='SELL').
+        Default = action (sem reclassificação).
+        """
         trade_type = "PAPER" if is_paper else "REAL"
+        if original_action is None:
+            original_action = action
         # UTC_TIMESTAMP(6) garante que o registro use UTC, independente do fuso do servidor MySQL.
         # O backend interpreta este DATETIME como UTC ao serializar para o frontend.
         query = """
-            INSERT INTO Trades (BinanceUid, Symbol, Action, Amount, Price, Timestamp, Type, PnL)
-            VALUES (%s, %s, %s, %s, %s, UTC_TIMESTAMP(6), %s, %s)
+            INSERT INTO Trades (BinanceUid, Symbol, Action, OriginalAction, Amount, Price, Timestamp, Type, PnL)
+            VALUES (%s, %s, %s, %s, %s, %s, UTC_TIMESTAMP(6), %s, %s)
         """
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(query, (binance_uid, symbol, action, amount, price, trade_type, pnl))
+                await cur.execute(query, (binance_uid, symbol, action, original_action, amount, price, trade_type, pnl))
 
     async def get_last_trade(self, binance_uid, symbol, is_paper):
         """Busca a última operação real (BUY/SELL) do usuário para calcular PnL teórico. HOLDs são ignorados."""

@@ -16,9 +16,4 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
 WORKDIR /app
 COPY --from=build /app/publish .
 
-# Opcional: Se precisar copiar o ca.pem do nível acima (diretório raiz do repositório)
-# Render injetará a variável de ambiente se você configurar.
-# Para builds na nuvem, o contexto geralmente é a raiz, mas na Vercel/Render
-# pode ser necessário adicionar a env via Dashboard.
-
 ENTRYPOINT ["dotnet", "AiSpotTrading.Backend.dll"]

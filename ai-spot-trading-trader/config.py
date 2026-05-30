@@ -10,15 +10,6 @@ class Config:
     MYSQL_USER = os.getenv("MYSQL_USER", "root")
     MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
     MYSQL_DB = os.getenv("MYSQL_DB", "ai_spot_trading")
-    _ca_content = os.getenv("MYSQL_SSL_CA_CONTENT")
-    if _ca_content:
-        _ca_path = "/tmp/ca.pem" if os.name != 'nt' else os.path.join(os.environ.get('TEMP', ''), 'ca.pem')
-        with open(_ca_path, "w", encoding="utf-8") as f:
-            f.write(_ca_content.replace("\\n", "\n"))
-        MYSQL_SSL_CA = _ca_path
-    else:
-        # Busca o ca.pem na mesma pasta do config.py
-        MYSQL_SSL_CA = os.getenv("MYSQL_SSL_CA", os.path.abspath(os.path.join(os.path.dirname(__file__), "ca.pem")))
 
     # Chave de criptografia AES-256-GCM compartilhada com o backend (base64 de 32 bytes)
     ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "")

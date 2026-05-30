@@ -43,6 +43,8 @@ namespace AiSpotTrading.Backend.Controllers
             {
                 Id = t.Id,
                 Action = t.Action,
+                // Fallback: trades antigos não tinham OriginalAction → usa o próprio Action.
+                OriginalAction = string.IsNullOrEmpty(t.OriginalAction) ? t.Action : t.OriginalAction,
                 Price = t.Price,
                 Amount = t.Amount,
                 PnL = t.PnL,

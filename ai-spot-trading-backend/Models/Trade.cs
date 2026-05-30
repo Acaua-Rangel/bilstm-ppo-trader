@@ -18,7 +18,13 @@ namespace AiSpotTrading.Backend.Models
 
         [Required]
         [MaxLength(20)]
-        public string Action { get; set; } = string.Empty; // BUY, SELL, HOLD
+        public string Action { get; set; } = string.Empty; // BUY, SELL, HOLD (efetiva)
+
+        // Ação original recomendada pelo modelo, antes de ser filtrada pela posição
+        // atual do usuário. Quando Action != OriginalAction, o sinal foi descartado
+        // (ex.: SELL ignorado por estar flat → salvo como HOLD com OriginalAction=SELL).
+        [MaxLength(20)]
+        public string OriginalAction { get; set; } = string.Empty;
 
         public decimal Amount { get; set; }
 

@@ -14,25 +14,9 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
 
-// Tratamento Cloud (Render): Grava o certificado em disco se for injetado via Variável de Ambiente
-var caContent = Environment.GetEnvironmentVariable("MYSQL_SSL_CA_CONTENT");
-if (!string.IsNullOrEmpty(caContent))
-{
-    System.IO.File.WriteAllText("/tmp/ca.pem", caContent.Replace("\\n", "\n"));
-}
-
 // EF Core / MySQL
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
     ?? "Server=localhost;Database=ai_spot_trading;User=root;Password=;";
-    
-// Auto-patch da string de conexão se estivermos no Render e o arquivo existir no /tmp
-if (System.IO.File.Exists("/tmp/ca.pem") && !connectionString.Contains("/tmp/ca.pem"))
-{
-    if (connectionString.Contains("SslCa=../ca.pem"))
-        connectionString = connectionString.Replace("SslCa=../ca.pem", "SslCa=/tmp/ca.pem");
-    else if (!connectionString.Contains("SslCa="))
-        connectionString = connectionString.TrimEnd(';') + ";SslMode=Required;SslCa=/tmp/ca.pem;";
-}
 
 var serverVersion = new MySqlServerVersion(new Version(8, 0, 31));
 

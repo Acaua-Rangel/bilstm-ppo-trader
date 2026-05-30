@@ -1,6 +1,130 @@
 # AI Trading Bot
 
-A TypeScript trading bot driven by a two-stage model: a **CNN → BiLSTM → Multi-Head Attention** forecaster predicting next-bar direction, and a **PPO** reinforcement-learning agent deciding when to enter and exit. Training runs in Jupyter notebooks on Kaggle; the TypeScript runtime only loads the converted models for backtesting and live trading.
+A trading bot driven by a two-stage model: a **CNN → BiLSTM → Multi-Head Attention** forecaster predicting next-bar direction, and a **PPO** reinforcement-learning agent deciding when to enter and exit. Training runs in Jupyter notebooks on Kaggle; the runtime services only load the converted models for paper/live trading.
+
+The project is split into three services that run side by side:
+
+| Service | Stack | Folder | Role |
+|---|---|---|---|
+| Backend API | C# / .NET 10, EF Core, MySQL | [ai-spot-trading-backend/](ai-spot-trading-backend/) | Auth (Google OAuth + JWT), exchange-account CRUD, trades + portfolio endpoints, klines proxy. |
+| Frontend | React 19, Vite, TypeScript, Tailwind | [ai-spot-trading-frontend/](ai-spot-trading-frontend/) | Dashboard: paper/invest toggle, balance/portfolio card, trading chart with zones. |
+| Trader | Python 3.12, TensorFlow, ccxt, aiomysql | [ai-spot-trading-trader/](ai-spot-trading-trader/) | Loads the trained models, fetches candles, emits BUY/SELL/HOLD signals every cycle, executes paper or real orders per user. |
+
+All three share the same MySQL database (Aiven or local).
+
+---
+
+## Running locally
+
+### Prerequisites
+
+| Tool | Version | Notes |
+|---|---|---|
+| .NET SDK | 10.0+ | Backend (`dotnet --list-sdks`). |
+| Node.js | 20+ | Frontend (`node -v`). |
+| Python | 3.12 | Trader (`python --version`). |
+| MySQL | 8.x | Local instance OR an Aiven/managed service. |
+
+You also need:
+- A **Google OAuth client ID** (Web application) for the login flow — used by both the backend and the frontend.
+- A **base64-encoded 32-byte AES-256 key** shared between the backend and the trader (used to encrypt Binance API keys at rest). Generate one with `openssl rand -base64 32`.
+- **Binance API key + secret** only if you plan to use Invest mode (real money). Paper mode does not need them.
+
+### 1) Backend (C# API) — port 5000
+
+```powershell
+cd ai-spot-trading-backend
+dotnet restore
+```
+
+Create `appsettings.Development.json` (gitignored) next to `appsettings.json`:
+
+```json
+{
+  "ConnectionStrings": {
+    "DefaultConnection": "Server=<host>;Port=<port>;Database=ai_spot_trading;User=<user>;Password=<pass>;SslMode=Required;"
+  },
+  "Jwt": {
+    "Secret": "<random-long-secret>",
+    "Issuer": "AiSpotTrading",
+    "Audience": "AiSpotTrading",
+    "ExpiryDays": 7
+  },
+  "Google": { "ClientId": "<your-client-id>.apps.googleusercontent.com" },
+  "Encryption": { "Key": "<base64-32-bytes>" },
+  "Cors": { "Origins": [ "http://localhost:5173" ] }
+}
+```
+
+Apply migrations and run:
+
+```powershell
+dotnet ef database update
+dotnet run
+```
+
+API will be at `http://localhost:5000`. Swagger at `/swagger`.
+
+### 2) Frontend (React + Vite) — port 5173
+
+```powershell
+cd ai-spot-trading-frontend
+npm install
+cp .env.example .env
+```
+
+Edit `.env`:
+```
+VITE_GOOGLE_CLIENT_ID=<same-client-id-as-backend>.apps.googleusercontent.com
+VITE_API_BASE_URL=http://localhost:5000
+```
+
+Run:
+```powershell
+npm run dev
+```
+
+Open `http://localhost:5173`.
+
+### 3) Trader (Python) — background process
+
+```powershell
+cd ai-spot-trading-trader
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+Place the trained models under `models/` (see `notebooks/` for how to train them):
+```
+models/forecaster.keras
+models/policy.keras
+```
+
+Create `.env` in the trader folder:
+```
+MYSQL_HOST=<same-host-as-backend>
+MYSQL_PORT=<port>
+MYSQL_USER=<user>
+MYSQL_PASSWORD=<pass>
+MYSQL_DB=ai_spot_trading
+MYSQL_SSL_CA=<path-to-ca.pem>      # only if your DB requires SSL (Aiven does)
+ENCRYPTION_KEY=<same-base64-key-as-backend>
+```
+
+Run:
+```powershell
+python main.py
+```
+
+The trader connects to the same MySQL, loops every cycle, and writes trade decisions to the `Trades` table — the dashboard reads from there.
+
+### Order of startup
+
+1. MySQL running and reachable.
+2. Backend (`dotnet run`) — applies migrations on the schema.
+3. Trader (`python main.py`) — needs the schema to exist.
+4. Frontend (`npm run dev`).
 
 ---
 

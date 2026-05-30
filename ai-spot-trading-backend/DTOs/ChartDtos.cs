@@ -3,7 +3,8 @@ namespace AiSpotTrading.Backend.DTOs
     public class TradeDecisionDto
     {
         public int Id { get; set; }
-        public string Action { get; set; } = string.Empty; // BUY, SELL, HOLD
+        public string Action { get; set; } = string.Empty; // BUY, SELL, HOLD (efetiva)
+        public string OriginalAction { get; set; } = string.Empty; // o que o modelo queria
         public decimal Price { get; set; }
         public decimal Amount { get; set; }
         public decimal PnL { get; set; }

@@ -122,6 +122,9 @@ export interface PortfolioItem {
 export interface TradeDecision {
   id: number;
   action: 'BUY' | 'SELL' | 'HOLD';
+  // Recomendação original do modelo antes do filtro de posição.
+  // Pode diferir de action quando o sinal foi descartado (ex.: SELL com flat → HOLD).
+  originalAction: 'BUY' | 'SELL' | 'HOLD';
   price: number;
   amount: number;
   pnl: number;
